@@ -220,3 +220,6 @@ __marimo__/
 # openImageGen
 output/
 .hf-cache/
+
+# Third-party skill, reinstalled with: npx impeccable install
+.claude/skills/impeccable/
