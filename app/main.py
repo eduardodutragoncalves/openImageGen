@@ -10,7 +10,7 @@ from pathlib import Path
 
 import torch
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from .config import Settings, get_settings
 from .engine import EngineResult, Flux2Engine
@@ -282,6 +282,18 @@ def _build_payload(body: GenerationRequest | EditRequest, settings: Settings, re
 
 
 # ------------------------------------------------------------------- endpoints
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    """Send anyone opening the base URL to the interactive docs."""
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    """Browsers request this on every page load; answer instead of logging 404s."""
+    return Response(status_code=204)
+
+
 @app.get("/healthz", response_model=HealthResponse, tags=["ops"])
 def healthz() -> HealthResponse:
     if state.load_error:

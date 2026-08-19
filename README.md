@@ -102,7 +102,8 @@ To hide cards from the service, use `CUDA_VISIBLE_DEVICES` as usual —
 | `GET` | `/v1/gpus` | VRAM usage per card and each one's role |
 | `GET` | `/healthz` | Service and queue status |
 
-Interactive docs at `http://localhost:8000/docs`.
+Interactive docs at `http://localhost:8000/docs`; the base URL redirects
+there.
 
 A ready-to-run curl reference for every endpoint lives in
 [scripts/api_examples.sh](scripts/api_examples.sh) — see
