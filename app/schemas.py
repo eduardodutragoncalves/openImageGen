@@ -105,18 +105,59 @@ class JobSubmitted(BaseModel):
     poll_url: str
 
 
+class JobImage(BaseModel):
+    """A produced file as the archive refers to it."""
+
+    url: str | None = None
+    seed: int
+    width: int
+    height: int
+    # False once retention has removed the file the job produced. The row stays
+    # so the prompt and settings remain recoverable.
+    available: bool = True
+
+
 class JobSummary(BaseModel):
-    """One row of GET /v1/jobs. Deliberately excludes the image payload."""
+    """One row of GET /v1/jobs.
+
+    Carries everything a gallery cell renders — prompt, size, seed, model and
+    the image URLs — because a grid of hundreds of rows cannot afford a
+    follow-up request per cell.
+    """
 
     id: str
     status: JobState
     kind: str
     created: int
+    started: int | None = None
     finished: int | None = None
     progress: float | None = None
     prompt: str
+    revised_prompt: str | None = None
+    model_id: str | None = None
+    model_label: str | None = None
+    width: int | None = None
+    height: int | None = None
+    num_steps: int | None = None
+    guidance: float | None = None
+    seed: int | None = None
+    num_images: int = 1
+    upsample_mode: str | None = None
+    reference_count: int = 0
+    queue_position: int | None = None
+    duration_s: float | None = None
+    images: list[JobImage] = Field(default_factory=list)
     image_count: int = 0
     error: str | None = None
+
+
+class JobPage(BaseModel):
+    """A window onto the archive, with the total so the UI can page honestly."""
+
+    jobs: list[JobSummary]
+    total: int
+    limit: int
+    offset: int
 
 
 class JobStatusResponse(BaseModel):
@@ -131,17 +172,85 @@ class JobStatusResponse(BaseModel):
     error: str | None = None
 
 
+Capability = Literal["text-to-image", "image-edit", "multi-reference"]
+Placement = Literal["split", "single", "offload", "none"]
+
+
 class ModelInfo(BaseModel):
+    """The model that is loaded right now, and how it sits on the hardware."""
+
     id: str
     repo_id: str
-    placement: Literal["split", "single", "offload", "none"]
+    family: str
+    label: str
+    licence: str
+    licence_url: str
+    commercial_use: bool
+    placement: Placement
     placement_reason: str
     transformer_device: str
     text_encoder_device: str
     cpu_offload: bool
     max_pixels: int
-    capabilities: list[Literal["text-to-image", "image-edit", "multi-reference"]]
+    capabilities: list[Capability]
+    supports_local_upsample: bool
+    step_range: list[int]
+    guidance_range: list[float]
+    max_reference_images: int
     defaults: dict[str, float | int]
+
+
+class CatalogEntry(BaseModel):
+    """One model this server knows about, runnable here or not."""
+
+    id: str
+    repo_id: str
+    family: str
+    label: str
+    summary: str
+    licence: str
+    licence_url: str
+    commercial_use: bool
+    capabilities: list[Capability]
+    default_steps: int
+    default_guidance: float
+    step_range: list[int]
+    guidance_range: list[float]
+    transformer_vram_gb: float
+    text_encoder_vram_gb: float
+    total_vram_gb: float
+    gated: bool
+    notes: str
+    custom: bool
+    loaded: bool
+    placement: Placement
+    placement_reason: str
+    # False when this hardware cannot hold the model. The entry is still
+    # returned: the reason is more useful than the absence.
+    runnable: bool
+    max_pixels: int
+
+
+class ModelStatusResponse(BaseModel):
+    """Where a load or a swap has got to."""
+
+    state: Literal["loading", "ready", "switching", "error"]
+    model_id: str | None = None
+    target_id: str | None = None
+    phase: str
+    progress: float = Field(ge=0.0, le=1.0)
+    detail: str | None = None
+    started: int
+    finished: int | None = None
+
+
+class ModelSwitchRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    model: str = Field(
+        min_length=1,
+        description="A catalog id (e.g. 'flux1-schnell') or a huggingface repo id.",
+    )
 
 
 class GpuInfo(BaseModel):
@@ -152,9 +261,21 @@ class GpuInfo(BaseModel):
     role: str | None = None
 
 
+class StorageInfo(BaseModel):
+    used_bytes: int
+    file_count: int
+    max_bytes: int | None = None
+    max_age_days: int | None = None
+
+
 class HealthResponse(BaseModel):
-    status: Literal["ok", "loading", "error"]
+    status: Literal["ok", "loading", "error", "switching"]
     model_loaded: bool
+    model: ModelStatusResponse
     queue_depth: int
+    queue_active: int
+    queue_paused: bool
+    auth_required: bool
     gpus: list[GpuInfo]
+    storage: StorageInfo
     detail: str | None = None

@@ -223,3 +223,16 @@ output/
 
 # Third-party skill, reinstalled with: npx impeccable install
 .claude/skills/impeccable/
+
+# Job archive (SQLite) — machine state, not source
+state/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+# Built studio, produced by `npm run build` in frontend/
+app/static/
+
+# Impeccable working directories
+.impeccable/review/
+.impeccable/mocks/

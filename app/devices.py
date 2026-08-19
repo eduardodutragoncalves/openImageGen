@@ -37,6 +37,9 @@ _FOOTPRINTS: list[tuple[str, float, float]] = [
     ("klein-9b", 19.0, 17.0),
     ("klein-base-4b", 9.0, 9.0),
     ("klein-base-9b", 19.0, 17.0),
+    # FLUX.1: an 11.9B transformer at bf16, plus T5-XXL and CLIP-L together.
+    ("flux.1-", 23.8, 9.8),
+    ("flux1-", 23.8, 9.8),
 ]
 
 _DEFAULT_FOOTPRINT = (19.0, 16.0)
@@ -114,9 +117,14 @@ def plan_placement(
     text_encoder_vram_gb: float | None = None,
 ) -> DevicePlan:
     """Choose where each component lives, honouring explicit overrides."""
-    default_transformer_gb, default_encoder_gb = component_footprints(repo_id)
-    need_transformer = transformer_vram_gb or default_transformer_gb
-    need_encoder = text_encoder_vram_gb or default_encoder_gb
+    if transformer_vram_gb and text_encoder_vram_gb:
+        # The caller already knows this checkpoint's footprints (the registry
+        # does), so the substring table — and its warning — is not consulted.
+        need_transformer, need_encoder = transformer_vram_gb, text_encoder_vram_gb
+    else:
+        default_transformer_gb, default_encoder_gb = component_footprints(repo_id)
+        need_transformer = transformer_vram_gb or default_transformer_gb
+        need_encoder = text_encoder_vram_gb or default_encoder_gb
 
     gpus = available_gpus()
 

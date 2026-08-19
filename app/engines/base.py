@@ -1,15 +1,9 @@
-"""FLUX.2 inference engine.
+"""Shared engine machinery.
 
-The placement of each component is decided at startup by :mod:`app.devices`
-from whatever GPUs are present:
-
-* two or more GPUs -> transformer (plus VAE) on one, text encoder on another.
-  Nothing is offloaded, and only the prompt embeddings cross the device
-  boundary, once per request.
-* one large GPU -> everything resident on it.
-* one small GPU -> diffusers' sequential CPU offload.
-
-Nothing here assumes a specific number of cards; see ``self.plan``.
+Everything that does not depend on which model family is loaded lives here:
+content screening, prompt upsampling, the sampling loop, the dry-run path and
+the placement plan. A family module supplies only what genuinely differs —
+which classes to load, and how a prompt becomes pipeline kwargs.
 """
 
 from __future__ import annotations
@@ -18,17 +12,19 @@ import gc
 import logging
 import random
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
 from PIL import Image
 
-from .config import Settings
-from .devices import plan_placement
-from .jobs import RejectedContent
-from .safety import IntegrityFilter, NsfwFilter
-from .upsampler import LocalUpsampler, OpenRouterUpsampler
+from ..config import Settings
+from ..devices import plan_placement
+from ..jobs import RejectedContent
+from ..models_registry import ModelSpec
+from ..safety import IntegrityFilter, NsfwFilter
+from ..upsampler import LocalUpsampler, OpenRouterUpsampler
 
 logger = logging.getLogger(__name__)
 
@@ -45,19 +41,22 @@ class EngineResult:
     timings: dict[str, float] = field(default_factory=dict)
 
 
-class Flux2Engine:
-    """Owns every model and serializes access to the GPUs."""
+class BaseEngine(ABC):
+    """Owns every model for one checkpoint and serializes access to the GPUs."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, spec: ModelSpec) -> None:
         self.settings = settings
+        self.spec = spec
         self.plan = plan_placement(
-            settings.repo_id,
+            spec.repo_id,
             transformer_device=settings.transformer_device,
             text_encoder_device=settings.text_encoder_device,
             cpu_offload=settings.cpu_offload,
             max_pixels=settings.max_pixels,
-            transformer_vram_gb=settings.transformer_vram_gb,
-            text_encoder_vram_gb=settings.text_encoder_vram_gb,
+            # The registry knows this checkpoint's real footprints; the
+            # planner's substring table is only the fallback for unknown ones.
+            transformer_vram_gb=settings.transformer_vram_gb or spec.transformer_vram_gb,
+            text_encoder_vram_gb=settings.text_encoder_vram_gb or spec.text_encoder_vram_gb,
         )
         logger.info("placement=%s: %s", self.plan.placement, self.plan.reason)
         self.pipe = None
@@ -66,11 +65,20 @@ class Flux2Engine:
         self._local_upsampler: LocalUpsampler | None = None
         self._openrouter: OpenRouterUpsampler | None = None
         self._loaded = False
+        # Set by the model manager so a load or a swap can report where it is.
+        # Loading 35GB of weights takes minutes; a spinner would be a lie the
+        # rest of this service does not tell.
+        self.on_phase: Callable[[str, float], None] | None = None
 
     # ------------------------------------------------------------------ load
     @property
     def loaded(self) -> bool:
         return self._loaded
+
+    @property
+    def supports_local_upsample(self) -> bool:
+        """Only a family whose text encoder is itself a VLM can rewrite prompts."""
+        return self._local_upsampler is not None
 
     def load(self) -> None:
         if self._loaded:
@@ -84,94 +92,17 @@ class Flux2Engine:
 
         if self.plan.placement == "none":
             raise RuntimeError(
-                "no CUDA device was detected. FLUX.2 needs a GPU; running the "
-                "transformer on CPU is not practical. Check your driver and "
-                "torch installation (torch.cuda.is_available() must be True), "
-                "or set OIG_DRY_RUN=true to exercise the API without a model."
+                "no CUDA device was detected. Diffusion transformers need a GPU; "
+                "running one on CPU is not practical. Check your driver and torch "
+                "installation (torch.cuda.is_available() must be True), or set "
+                "OIG_DRY_RUN=true to exercise the API without a model."
             )
 
-        from diffusers import (
-            AutoencoderKLFlux2,
-            Flux2Pipeline,
-            Flux2Transformer2DModel,
-            FlowMatchEulerDiscreteScheduler,
-        )
-        from transformers import AutoProcessor, Mistral3ForConditionalGeneration
-
-        repo = settings.repo_id
-        plan = self.plan
-        dit_device = plan.transformer_device
-        te_device = plan.text_encoder_device
-
-        # With CPU offload diffusers owns placement: the components must be
-        # loaded onto the CPU first, otherwise accelerate refuses to move
-        # already-dispatched modules.
-        dit_map = "cpu" if plan.cpu_offload else dit_device
-        te_map = "cpu" if plan.cpu_offload else te_device
-
         t0 = time.perf_counter()
-        logger.info("loading transformer from %s onto %s", repo, dit_map)
-        # A plain device string is what both diffusers and transformers
-        # normalize into {"": device}; passing the dict form directly leaves a
-        # str where accelerate expects a torch.device on some versions.
-        transformer = Flux2Transformer2DModel.from_pretrained(
-            repo,
-            subfolder="transformer",
-            torch_dtype=torch.bfloat16,
-            device_map=dit_map,
-        )
+        self._phase("resolving weights", 0.02)
+        self._load_pipeline()
+        self._phase("ready", 1.0)
 
-        logger.info("loading vae onto %s", dit_map)
-        vae = AutoencoderKLFlux2.from_pretrained(repo, subfolder="vae", torch_dtype=torch.bfloat16)
-        if not plan.cpu_offload:
-            vae = vae.to(dit_device)
-
-        logger.info("loading text encoder onto %s", te_map)
-        text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
-            repo,
-            subfolder="text_encoder",
-            torch_dtype=torch.bfloat16,
-            device_map=te_map,
-        )
-
-        processor = AutoProcessor.from_pretrained(repo, subfolder="tokenizer")
-        scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(repo, subfolder="scheduler")
-
-        # The stock pipeline derives its working device from the first module it
-        # finds, which is ambiguous once components live on different cards (and
-        # points at the CPU while offloading). Pin it to the compute device:
-        # that is where latents, the VAE and the denoising loop must run.
-        compute_device = torch.device(dit_device)
-
-        class _PinnedDeviceFlux2Pipeline(Flux2Pipeline):
-            @property
-            def _execution_device(self) -> torch.device:
-                return compute_device
-
-        self.pipe = _PinnedDeviceFlux2Pipeline(
-            scheduler=scheduler,
-            vae=vae,
-            text_encoder=text_encoder,
-            tokenizer=processor,
-            transformer=transformer,
-        )
-        self.pipe.set_progress_bar_config(disable=True)
-
-        if plan.cpu_offload:
-            # Small-GPU path: diffusers moves each component in and out per stage.
-            self.pipe.enable_model_cpu_offload(device=dit_device)
-
-        if settings.enable_nsfw_filter:
-            # When memory is tight enough to need offloading, this small
-            # classifier is not worth the VRAM it would hold permanently.
-            filter_device = "cpu" if plan.cpu_offload else te_device
-            logger.info("loading NSFW classifier onto %s", filter_device)
-            self._nsfw = NsfwFilter(settings.nsfw_model, filter_device, settings.nsfw_threshold)
-
-        if settings.enable_integrity_filter:
-            self._integrity = IntegrityFilter(text_encoder, processor)
-
-        self._local_upsampler = LocalUpsampler(self.pipe, te_device)
         if settings.openrouter_api_key:
             self._openrouter = OpenRouterUpsampler(
                 settings.openrouter_api_key,
@@ -180,41 +111,84 @@ class Flux2Engine:
             )
 
         self._loaded = True
-        logger.info("models ready in %.1fs", time.perf_counter() - t0)
+        logger.info("%s ready in %.1fs", self.spec.label, time.perf_counter() - t0)
 
     def unload(self) -> None:
         self.pipe = None
         self._nsfw = None
         self._integrity = None
         self._local_upsampler = None
+        self._openrouter = None
         self._loaded = False
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    def _phase(self, label: str, progress: float) -> None:
+        logger.info("%s: %s", self.spec.label, label)
+        if self.on_phase is not None:
+            self.on_phase(label, progress)
+
+    def _load_nsfw_filter(self, preferred_device: str) -> None:
+        if not self.settings.enable_nsfw_filter:
+            return
+        # When memory is tight enough to need offloading, this small classifier
+        # is not worth the VRAM it would hold permanently.
+        device = "cpu" if self.plan.cpu_offload else preferred_device
+        logger.info("loading NSFW classifier onto %s", device)
+        self._nsfw = NsfwFilter(self.settings.nsfw_model, device, self.settings.nsfw_threshold)
+
     # -------------------------------------------------------------- describe
     def describe(self) -> dict:
-        settings = self.settings
+        spec = self.spec
         plan = self.plan
+        settings = self.settings
         return {
-            "id": settings.repo_id.rsplit("/", 1)[-1].lower(),
-            "repo_id": settings.repo_id,
+            "id": spec.id,
+            "repo_id": spec.repo_id,
+            "family": spec.family,
+            "label": spec.label,
+            "licence": spec.licence,
+            "licence_url": spec.licence_url,
+            "commercial_use": spec.commercial_use,
             "placement": plan.placement,
             "placement_reason": plan.reason,
             "transformer_device": plan.transformer_device,
             "text_encoder_device": plan.text_encoder_device,
             "cpu_offload": plan.cpu_offload,
             "max_pixels": plan.max_pixels,
-            "capabilities": ["text-to-image", "image-edit", "multi-reference"],
+            "capabilities": list(spec.capabilities),
+            "supports_local_upsample": self.supports_local_upsample,
+            "step_range": list(spec.step_range),
+            "guidance_range": list(spec.guidance_range),
+            "max_reference_images": (
+                settings.max_reference_images if "multi-reference" in spec.capabilities
+                else (1 if spec.supports_edit else 0)
+            ),
             "defaults": {
-                "num_steps": settings.default_steps,
-                "guidance": settings.default_guidance,
+                "num_steps": self.default_steps,
+                "guidance": self.default_guidance,
                 "width": settings.default_width,
                 "height": settings.default_height,
             },
         }
 
-    # -------------------------------------------------------------- prompting
+    @property
+    def default_steps(self) -> int:
+        """Steps are a property of the checkpoint, not of the deployment.
+
+        OIG_DEFAULT_STEPS stays meaningful only for a checkpoint the registry
+        does not know: applying a global 50 to FLUX.1 [schnell], which finishes
+        in four, would quietly make every request twelve times slower than the
+        model intends.
+        """
+        return self.settings.default_steps if self.spec.custom else self.spec.default_steps
+
+    @property
+    def default_guidance(self) -> float:
+        return self.settings.default_guidance if self.spec.custom else self.spec.default_guidance
+
+    # ------------------------------------------------------------- prompting
     def upsample(self, prompt: str, references: list[Image.Image] | None, mode: str) -> str:
         if mode == "openrouter":
             if self._openrouter is None:
@@ -224,7 +198,10 @@ class Flux2Engine:
             return self._openrouter.upsample(prompt, references)
         if mode == "local":
             if self._local_upsampler is None:
-                raise RuntimeError("local upsampling is unavailable")
+                raise RuntimeError(
+                    f"{self.spec.label} has no vision-language text encoder, so local "
+                    "prompt upsampling is unavailable; use 'openrouter' or 'none'"
+                )
             return self._local_upsampler.upsample(prompt, references)
         return prompt
 
@@ -271,10 +248,20 @@ class Flux2Engine:
         references = references or []
         timings: dict[str, float] = {}
 
+        if references and not self.spec.supports_edit:
+            raise RejectedContent(
+                f"{self.spec.label} cannot edit images; it is text-to-image only. "
+                "Switch to a model with the image-edit capability."
+            )
+
         width = width or settings.default_width
         height = height or settings.default_height
-        num_steps = num_steps or settings.default_steps
-        guidance = settings.default_guidance if guidance is None else guidance
+        num_steps = num_steps or self.default_steps
+        guidance = self.default_guidance if guidance is None else guidance
+        # A model that ignores guidance must not be handed a value that makes
+        # its output silently differ from what the UI showed.
+        low, high = self.spec.guidance_range
+        guidance = min(max(guidance, low), high)
 
         # ------------------------------------------------------- input screen
         t0 = time.perf_counter()
@@ -299,15 +286,11 @@ class Flux2Engine:
 
         # -------------------------------------------- encode once, then sample
         t0 = time.perf_counter()
-        te_device = torch.device(self.plan.text_encoder_device)
-        dit_device = torch.device(self.plan.transformer_device)
-        prompt_embeds, _ = self.pipe.encode_prompt(prompt=effective_prompt, device=te_device)
-        # A no-op unless the encoder sits on a different card, in which case
-        # this is the only tensor that crosses the PCIe boundary.
-        prompt_embeds = prompt_embeds.to(dit_device)
+        conditioning = self._encode(effective_prompt)
         timings["encode_prompt_s"] = time.perf_counter() - t0
 
         # ------------------------------------------------------------ sample
+        dit_device = torch.device(self.plan.transformer_device)
         images: list[Image.Image] = []
         seeds: list[int] = []
         base_seed = seed if seed is not None else random.randrange(2**31)
@@ -325,8 +308,8 @@ class Flux2Engine:
                 return kwargs
 
             output = self.pipe(
-                prompt_embeds=prompt_embeds,
-                image=list(references) or None,
+                **conditioning,
+                **self._reference_kwargs(references),
                 height=height,
                 width=width,
                 num_inference_steps=num_steps,
@@ -347,7 +330,9 @@ class Flux2Engine:
         kept_seeds: list[int] = []
         for image, image_seed in zip(images, seeds):
             if self._screen_output(image):
-                logger.warning("discarding generated image (seed %s): flagged by filters", image_seed)
+                logger.warning(
+                    "discarding generated image (seed %s): flagged by filters", image_seed
+                )
                 continue
             kept.append(image)
             kept_seeds.append(image_seed)
@@ -367,6 +352,18 @@ class Flux2Engine:
             revised_prompt=revised_prompt,
             timings=timings,
         )
+
+    # ---------------------------------------------------------- family hooks
+    @abstractmethod
+    def _load_pipeline(self) -> None:
+        """Load the components and assign self.pipe."""
+
+    @abstractmethod
+    def _encode(self, prompt: str) -> dict:
+        """Encode the prompt into the kwargs this family's pipeline expects."""
+
+    def _reference_kwargs(self, references: list[Image.Image]) -> dict:
+        return {"image": list(references) or None} if references else {}
 
     # --------------------------------------------------------------- helpers
     def _dry_run_result(

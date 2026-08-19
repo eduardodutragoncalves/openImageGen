@@ -30,6 +30,11 @@ class Job:
     id: str
     kind: str
     payload: object
+    # Which API key submitted this. History is scoped by it, so it is part of
+    # the job, not of the request that happened to create it.
+    owner: str = "local"
+    model_id: str | None = None
+    model_label: str | None = None
     state: JobState = JobState.queued
     created: int = field(default_factory=lambda: int(time.time()))
     started: int | None = None
@@ -66,10 +71,51 @@ class JobQueue:
         self._lock = threading.Lock()
         self._ttl = ttl_seconds
         self._stopping = threading.Event()
+        # Set means "workers may pick up work". Cleared while the model is
+        # being swapped: 35GB of weights cannot be unloaded under a running
+        # denoise loop, so the queue drains first and holds.
+        self._gate = threading.Event()
+        self._gate.set()
+        self._active = 0
+        self._idle = threading.Event()
+        self._idle.set()
+        self._on_change: Callable[[Job], None] | None = None
         self._threads = [
             threading.Thread(target=self._worker, name=f"flux2-worker-{i}", daemon=True)
             for i in range(max(1, workers))
         ]
+
+    def on_change(self, callback: Callable[[Job], None]) -> None:
+        """Called whenever a job changes state, so history can be persisted."""
+        self._on_change = callback
+
+    def _changed(self, job: Job) -> None:
+        if self._on_change is None:
+            return
+        try:
+            self._on_change(job)
+        except Exception:  # noqa: BLE001 - history must never break generation
+            logger.exception("job history update failed for %s", job.id)
+
+    # -------------------------------------------------------------- draining
+    def pause(self) -> None:
+        """Stop handing work to the workers; a running job still finishes."""
+        self._gate.clear()
+
+    def resume(self) -> None:
+        self._gate.set()
+
+    @property
+    def paused(self) -> bool:
+        return not self._gate.is_set()
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        """Block until nothing is running. Pause first, or this may never win."""
+        return self._idle.wait(timeout=timeout)
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -88,8 +134,23 @@ class JobQueue:
             thread.join(timeout=timeout)
 
     # ---------------------------------------------------------------- public
-    def submit(self, kind: str, payload: object) -> Job:
-        job = Job(id=uuid.uuid4().hex, kind=kind, payload=payload)
+    def submit(
+        self,
+        kind: str,
+        payload: object,
+        *,
+        owner: str = "local",
+        model_id: str | None = None,
+        model_label: str | None = None,
+    ) -> Job:
+        job = Job(
+            id=uuid.uuid4().hex,
+            kind=kind,
+            payload=payload,
+            owner=owner,
+            model_id=model_id,
+            model_label=model_label,
+        )
         with self._lock:
             self._evict_expired()
             self._jobs[job.id] = job
@@ -101,6 +162,7 @@ class JobQueue:
                 self._jobs.pop(job.id, None)
                 self._order.remove(job.id)
             raise QueueFull("generation queue is full, retry later") from None
+        self._changed(job)
         return job
 
     def get(self, job_id: str) -> Job | None:
@@ -137,12 +199,23 @@ class JobQueue:
     # --------------------------------------------------------------- interns
     def _worker(self) -> None:
         while not self._stopping.is_set():
-            job = self._queue.get()
+            # Held here while a model swap is in progress. The timeout keeps
+            # the stop sentinel reachable during a shutdown mid-swap.
+            if not self._gate.wait(timeout=0.5):
+                continue
+            try:
+                job = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
             if job is _SENTINEL:
                 self._queue.task_done()
                 break
+            with self._lock:
+                self._active += 1
+                self._idle.clear()
             job.state = JobState.running
             job.started = int(time.time())
+            self._changed(job)
             try:
                 job.result = self._handler(job)
                 job.state = JobState.succeeded
@@ -157,6 +230,11 @@ class JobQueue:
             finally:
                 job.finished = int(time.time())
                 job.done.set()
+                with self._lock:
+                    self._active -= 1
+                    if self._active == 0:
+                        self._idle.set()
+                self._changed(job)
                 self._queue.task_done()
 
     def _evict_expired(self) -> None:

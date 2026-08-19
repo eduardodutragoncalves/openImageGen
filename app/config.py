@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -54,6 +55,8 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------ jobs
     queue_max_size: int = 32
+    # How long a *finished* job stays in memory. History itself is on disk and
+    # is governed by the retention settings below, not by this.
     job_ttl_seconds: int = 3600
     # One replica: the DiT spans both cards, so generations run one at a time.
     workers: int = 1
@@ -71,20 +74,54 @@ class Settings(BaseSettings):
     openrouter_model: str = "mistralai/pixtral-large-2411"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
+    # ------------------------------------------------------------- retention
+    # Generated files outlive the job record, so without a cap the gallery
+    # fills the disk. Enforced after every write, oldest first.
+    output_max_gb: float | None = 50.0
+    output_max_age_days: int | None = None
+
     # ------------------------------------------------------------------- api
     host: str = "0.0.0.0"
     port: int = 8000
-    api_keys: list[str] = Field(default_factory=list)
+    api_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Refusing to listen on a public interface without keys is the whole of the
+    # auth story for a service that answers from the internet. Set this only
+    # when something in front of it (a tunnel, a reverse proxy) does the
+    # authenticating.
+    allow_open_access: bool = False
     output_dir: Path = PROJECT_ROOT / "output"
+    state_dir: Path = PROJECT_ROOT / "state"
+    # Serve the built UI from app/static when it exists.
+    serve_ui: bool = True
+    # Allow the Vite dev server's origin. Off in production: the built UI is
+    # same-origin and needs no CORS at all.
+    dev: bool = False
+    dev_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
+    )
     # Skip model loading; useful to exercise the HTTP layer without a GPU.
     dry_run: bool = False
 
-    @field_validator("api_keys", mode="before")
+    @field_validator("api_keys", "dev_origins", mode="before")
     @classmethod
-    def _split_keys(cls, v: object) -> object:
+    def _split_csv(cls, v: object) -> object:
+        """Accept a comma-separated string from the environment.
+
+        The fields are annotated NoDecode so pydantic-settings hands the raw
+        string through instead of trying to read it as JSON first, which is
+        what made OIG_API_KEYS=a,b fail before it ever reached this.
+        """
         if isinstance(v, str):
             return [k.strip() for k in v.split(",") if k.strip()]
         return v
+
+    @property
+    def auth_required(self) -> bool:
+        return bool(self.api_keys)
+
+    @property
+    def binds_publicly(self) -> bool:
+        return self.host not in ("127.0.0.1", "localhost", "::1")
 
     @property
     def watermark_enabled(self) -> bool:
