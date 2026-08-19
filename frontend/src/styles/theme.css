@@ -1,0 +1,351 @@
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────────────────
+   The type. Two variable families, self-hosted: Archivo carries a width axis,
+   which is where the monumental expanded numerals come from without shipping a
+   second display family. Martian Mono is grid-constructed by design and is
+   used only where the content is a measurement — seeds, sizes, VRAM, ids.
+   ───────────────────────────────────────────────────────────────────────── */
+@font-face {
+  font-family: "Archivo";
+  src: url("/fonts/archivo-latin.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Martian Mono";
+  src: url("/fonts/martian-mono-latin.woff2") format("woff2-variations");
+  font-weight: 100 800;
+  font-stretch: 75% 112.5%;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   The palette. Dark is the default because of the room, not the category: a
+   workstation beside the rig, often dim, judging photographic output for hours.
+   The light register is the specimen sheet the world comes from, and is real.
+   Colour is spent on state and nothing else, so the generated images stay the
+   only saturated thing on screen.
+   ───────────────────────────────────────────────────────────────────────── */
+:root,
+[data-theme="dark"] {
+  --ground: #08090b;
+  --ground-sunk: #050607;
+  --surface: #0e1013;
+  --surface-raised: #14171c;
+
+  --grid-fine: rgb(233 237 244 / 0.055);
+  --grid-major: rgb(233 237 244 / 0.14);
+  --rule: rgb(233 237 244 / 0.16);
+  --rule-strong: rgb(233 237 244 / 0.34);
+
+  --ink: #e9edf4;
+  --ink-muted: #97a0ae;
+  --ink-faint: #737d8b;
+  --ink-on-accent: #ffffff;
+
+  --accent: #0057ff;
+  --accent-hover: #1a6bff;
+  --accent-ink: #6b9dff;
+  --accent-wash: rgb(0 87 255 / 0.14);
+
+  --caution: #ffb020;
+  --caution-ink: #ffb020;
+  --alarm: #ff4526;
+  --alarm-ink: #ff6a50;
+
+  --selection: rgb(0 87 255 / 0.4);
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --ground: #f5f7fa;
+  --ground-sunk: #e9edf2;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+
+  --grid-fine: rgb(17 17 17 / 0.05);
+  --grid-major: rgb(17 17 17 / 0.11);
+  --rule: rgb(17 17 17 / 0.2);
+  --rule-strong: rgb(17 17 17 / 0.42);
+
+  --ink: #111111;
+  --ink-muted: #4a5260;
+  --ink-faint: #5f6875;
+  --ink-on-accent: #ffffff;
+
+  --accent: #0057ff;
+  --accent-hover: #0047d6;
+  --accent-ink: #0043c9;
+  --accent-wash: rgb(0 87 255 / 0.09);
+
+  --caution: #b26a00;
+  --caution-ink: #8a5200;
+  --alarm: #d02b0d;
+  --alarm-ink: #b52509;
+
+  --selection: rgb(0 87 255 / 0.22);
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-ground-sunk: var(--ground-sunk);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-grid-fine: var(--grid-fine);
+  --color-grid-major: var(--grid-major);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-ink-on-accent: var(--ink-on-accent);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-wash: var(--accent-wash);
+  --color-caution: var(--caution);
+  --color-caution-ink: var(--caution-ink);
+  --color-alarm: var(--alarm);
+  --color-alarm-ink: var(--alarm-ink);
+
+  --font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Martian Mono", ui-monospace, "SF Mono", monospace;
+
+  /* Everything is a multiple of the construction cell. */
+  --spacing: 4px;
+  --radius-none: 0px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   The construction grid. It is not a texture: it is the armature every region
+   aligns to, and it stays visible, which is the whole idea of the world.
+   ───────────────────────────────────────────────────────────────────────── */
+@layer base {
+  :root {
+    --cell: 8px;
+    --major: 64px;
+    --rail: 56px;
+  }
+
+  * {
+    border-color: var(--rule);
+  }
+
+  html {
+    background: var(--ground);
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--ground);
+    background-image:
+      linear-gradient(to right, var(--grid-major) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-major) 1px, transparent 1px),
+      linear-gradient(to right, var(--grid-fine) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--grid-fine) 1px, transparent 1px);
+    background-size:
+      var(--major) var(--major),
+      var(--major) var(--major),
+      var(--cell) var(--cell),
+      var(--cell) var(--cell);
+    background-position: 0 0;
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    font-synthesis: none;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* The browser surfaces are part of the design, not defaults left behind. */
+  ::selection {
+    background: var(--selection);
+    color: var(--ink);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule-strong) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+    border-left: 1px solid var(--rule);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--rule-strong);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--accent);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent-ink);
+    outline-offset: 1px;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+    caret-color: var(--accent-ink);
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--ink-faint);
+  }
+
+  a {
+    color: var(--accent-ink);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+  }
+
+  /* Measurements must not shift width as they update. */
+  .tabular,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   The component language, taken from the specimen: rules not boxes, one flat
+   accent plane, and the 45° diagonal as the recurring mark.
+   ───────────────────────────────────────────────────────────────────────── */
+@layer components {
+  .label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    font-stretch: 100%;
+  }
+
+  .label-accent {
+    color: var(--accent-ink);
+  }
+
+  /* Monumental numerals: the expanded axis is what makes them constructed
+     rather than merely large. */
+  .numeral {
+    font-family: var(--font-sans);
+    font-stretch: 125%;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+    line-height: 0.9;
+  }
+
+  .rule-t { border-top: 1px solid var(--rule); }
+  .rule-b { border-bottom: 1px solid var(--rule); }
+  .rule-l { border-left: 1px solid var(--rule); }
+  .rule-r { border-right: 1px solid var(--rule); }
+
+  /* The diagonal. One mark, drawn the same way everywhere it appears. */
+  .diagonal {
+    background-image: linear-gradient(
+      45deg,
+      transparent calc(50% - 0.5px),
+      currentColor calc(50% - 0.5px),
+      currentColor calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    );
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 12px;
+    height: 40px;
+    border: 1px solid var(--rule-strong);
+    background: transparent;
+    color: var(--ink);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: background-color 140ms cubic-bezier(0.16, 1, 0.3, 1),
+      border-color 140ms cubic-bezier(0.16, 1, 0.3, 1),
+      color 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+  .btn:disabled {
+    color: var(--ink-faint);
+    border-color: var(--rule);
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--ink-on-accent);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    color: var(--ink-on-accent);
+  }
+  .btn-primary:disabled {
+    background: transparent;
+    border-color: var(--rule);
+    color: var(--ink-faint);
+  }
+
+  .field {
+    width: 100%;
+    background: var(--ground-sunk);
+    border: 1px solid var(--rule);
+    padding: 8px 10px;
+    color: var(--ink);
+    transition: border-color 140ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .field:hover {
+    border-color: var(--rule-strong);
+  }
+  .field:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  /* Dotted field: the specimen's texture for a region with nothing in it yet. */
+  .dotted {
+    background-image: radial-gradient(var(--rule) 1px, transparent 1px);
+    background-size: var(--cell) var(--cell);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
