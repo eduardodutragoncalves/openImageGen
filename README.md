@@ -74,9 +74,14 @@ cp .env.example .env
 # 3. weights (~34GB, do this before the first request)
 python scripts/download_weights.py
 
-# 4. serve
+# 4. build the studio (the web UI, served by the same process)
+cd frontend && npm install && npm run build && cd ..
+
+# 5. serve
 ./scripts/serve.sh
 ```
+
+Then open <http://localhost:8000>. The API docs stay at `/docs`.
 
 The API comes up immediately and loads the models in the background:
 `GET /healthz` reports `loading` until everything is ready. Requests sent
@@ -85,6 +90,27 @@ loaded.
 
 To hide cards from the service, use `CUDA_VISIBLE_DEVICES` as usual —
 `serve.sh` does not touch that variable.
+
+### ⚠️ A key is required on a public interface
+
+`OIG_HOST` defaults to `0.0.0.0`, which answers anything that can reach the
+port. With `OIG_API_KEYS` empty, that is an open image generator, so **the
+service now refuses to start in that combination**:
+
+```
+OIG_HOST=0.0.0.0 listens beyond this machine and OIG_API_KEYS is empty …
+```
+
+Three ways out, in order of preference:
+
+```bash
+OIG_API_KEYS=key-one,key-two   # give each person their own; history is per key
+OIG_HOST=127.0.0.1             # local only
+OIG_ALLOW_OPEN_ACCESS=true     # only when a proxy in front already authenticates
+```
+
+Skipping the build in step 4 is fine — the API works without it, and `/`
+redirects to `/docs` when no studio has been built.
 
 ---
 
@@ -95,16 +121,27 @@ To hide cards from the service, use `CUDA_VISIBLE_DEVICES` as usual —
 | `POST` | `/v1/images/generations` | Text-to-image |
 | `POST` | `/v1/images/edits` | Edit with 1..N reference images (base64/data URI) |
 | `POST` | `/v1/images/edits/upload` | Same, via multipart upload |
-| `GET` | `/v1/jobs` | Recent jobs, newest first (`?limit=`, `?status=`) |
+| `GET` | `/v1/jobs` | The archive, newest first (`?limit=`, `?offset=`, `?status=`, `?kind=`, `?model_id=`, `?search=`) |
 | `GET` | `/v1/jobs/{id}` | Job status (`?wait=30` blocks until it finishes) |
 | `GET` | `/v1/jobs/{id}/image` | Raw image bytes (`?index=N`) |
+| `DELETE` | `/v1/jobs/{id}` | Remove a job and the files it produced |
 | `GET` | `/v1/files/{name}` | File saved when `response_format="url"` |
-| `GET` | `/v1/models` | Loaded model, placement and defaults |
+| `GET` | `/v1/models` | Loaded model, placement, precision and per-model limits |
+| `GET` | `/v1/models/catalog` | Every known model, runnable here or not, with the reason |
+| `POST` | `/v1/models/load` | Replace the loaded model; returns `202` |
+| `GET` | `/v1/models/status` | Where a load or swap has got to |
 | `GET` | `/v1/gpus` | VRAM usage per card and each one's role |
-| `GET` | `/healthz` | Service and queue status |
+| `GET` | `/v1/auth` | Whether this caller is authenticated, and as whom |
+| `POST` | `/v1/auth` | Exchange a key for a session cookie |
+| `DELETE` | `/v1/auth` | Sign out |
+| `GET` | `/healthz` | Service, model, queue and storage status |
 
-Interactive docs at `http://localhost:8000/docs`; the base URL redirects
-there.
+Every `/v1` route accepts either an `X-API-Key` header or the session cookie
+`POST /v1/auth` sets. The cookie exists because `<img src="/v1/files/…">`
+cannot send a header, and it holds a hash of the key rather than the key.
+
+Interactive docs at `http://localhost:8000/docs`; the base URL serves the
+studio when one has been built, and redirects to the docs when it has not.
 
 A ready-to-run curl reference for every endpoint lives in
 [scripts/api_examples.sh](scripts/api_examples.sh) — see
@@ -240,22 +277,96 @@ Blocked content ends the job with status `rejected` and the reason in `error`
 
 ## Switching models
 
-The service depends only on `OIG_REPO_ID`; the planner recognizes the FLUX.2
-families and recomputes placement on its own.
+Models are a runtime choice, not a restart. `OIG_REPO_ID` still decides what
+loads at startup; after that, the **Models** page of the studio — or
+`POST /v1/models/load` — replaces it in place.
 
 ```bash
-# FLUX.2 [klein] 4B — Apache-2.0, ~9GB, 4 steps, sub-second
-OIG_REPO_ID=black-forest-labs/FLUX.2-klein-4B
-OIG_DEFAULT_STEPS=4
-OIG_DEFAULT_GUIDANCE=1.0
+curl -X POST localhost:8000/v1/models/load \
+  -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+  -d '{"model": "flux1-schnell"}'
+# 202; then poll:
+curl localhost:8000/v1/models/status
 ```
 
-`klein` is distilled in both steps **and** guidance: `num_steps` and
-`guidance` are fixed, changing them degrades the output.
+A swap drains the queue, unloads the resident weights, replans placement for
+the new architecture and loads again. It takes minutes, so `switching` is a
+first-class state with real phases rather than a spinner, and anything queued
+during it runs once the new model is resident. If the swap fails, the previous
+model is reloaded and the failure is reported.
 
-For a checkpoint the planner does not recognize, supply the sizes with
-`OIG_TRANSFORMER_VRAM_GB` and `OIG_TEXT_ENCODER_VRAM_GB` — it warns in the log
-when it is guessing.
+### What the catalog holds
+
+| Family | Checkpoints | Notes |
+| --- | --- | --- |
+| FLUX.2 | `dev` 4-bit, `dev` bf16, `klein` 4B, `klein` 9B | `Flux2Pipeline`, Mistral3 text encoder |
+| FLUX.1 | `schnell`, `dev`, `Krea dev`, `Kontext dev` | `FluxPipeline`, T5-XXL + CLIP-L |
+
+`GET /v1/models/catalog` returns every one of them **including the ones this
+machine cannot run**, each with the reason — hiding them answers "why can't I
+pick that?" with silence. FLUX.2 [dev] bf16 needs 65GB for the transformer
+alone, so on a 24GB card it lists as unavailable rather than failing at load.
+
+FLUX.1's 11.9B transformer is ~23.8GB at bf16, which does not fit a 24GB card
+with room for activations, so it is **quantized to NF4 on the way in** (~7GB
+transformer, ~3.5GB T5). The precision actually used is reported per model and
+shown in the studio. FLUX.1 [schnell] finishes in four steps rather than fifty.
+
+Steps and guidance come from the checkpoint, not from `OIG_DEFAULT_STEPS`:
+applying a global 50 to schnell would make every request twelve times slower
+than the model intends. `klein` is distilled in both steps **and** guidance;
+changing them degrades the output.
+
+Any Hugging Face repo id outside the catalog is still accepted, by the same
+endpoint or the field at the bottom of the Models page. Its architecture is
+guessed from the name and its footprint assumed, so supply the sizes with
+`OIG_TRANSFORMER_VRAM_GB` and `OIG_TEXT_ENCODER_VRAM_GB` if it misplaces.
+
+---
+
+## The studio
+
+A single-page app built with Vite and served by this same process from
+`app/static`, so there is one origin, one port and no CORS.
+
+- **Compose and watch at once.** Queueing more work while a job runs is the
+  normal case; the form is never blocked by the GPU.
+- **The wait is designed, not decorated.** Progress is per-step and truthful,
+  the estimate is measured from the run in progress rather than assumed, and a
+  queued job says what it is waiting behind.
+- **The archive survives restarts.** Jobs go to SQLite under `OIG_STATE_DIR`,
+  every result is addressable at `/j/<id>`, and `OIG_OUTPUT_MAX_GB` keeps the
+  files from filling the disk. A job whose file retention reclaimed still shows
+  its prompt, seed and settings.
+- **History is scoped per API key**, so on a shared server each person sees
+  their own work. Give each person their own entry in `OIG_API_KEYS`.
+
+Development runs Vite against a live API:
+
+```bash
+OIG_DEV=true ./scripts/serve.sh    # allow the dev origin
+cd frontend && npm run dev         # http://localhost:5173, proxying /v1
+```
+
+The TypeScript client is generated from this service's own OpenAPI schema, so
+the two sides cannot drift:
+
+```bash
+cd frontend && npm run schema
+```
+
+---
+
+## Tests
+
+```bash
+pytest tests/                      # 31 checks, no GPU: runs under OIG_DRY_RUN
+cd frontend && npm run test:e2e    # the critical path in a real browser
+```
+
+Both suites use `OIG_DRY_RUN`, which simulates per-step progress rather than
+finishing instantly — the queue, the estimate and every live state in the UI
+are only reachable when a job takes measurable time.
 
 ---
 
@@ -325,17 +436,29 @@ BASE_URL=http://gpu-host:8000 API_KEY=key-one scripts/api_examples.sh health
 
 ```
 app/
-  config.py      Settings (pydantic-settings, OIG_ prefix)
-  devices.py     GPU detection and placement planning
-  schemas.py     request/response contracts
-  engine.py      model loading, placement, generation
-  jobs.py        FIFO queue + workers
-  safety.py      NSFW + integrity filter
-  upsampler.py   local and OpenRouter prompt upsampling
-  images.py      base64/PIL helpers, pixel budget
-  main.py        FastAPI routes
+  config.py          Settings (pydantic-settings, OIG_ prefix)
+  devices.py         GPU detection and placement planning
+  models_registry.py the catalog: footprints, licences, per-model limits
+  model_manager.py   loading, and swapping the loaded model at runtime
+  engines/
+    base.py          screening, upsampling, sampling loop, dry run
+    flux2.py         Flux2Pipeline + Mistral3 encoder
+    flux1.py         FluxPipeline + T5-XXL/CLIP-L, NF4 when it must
+  schemas.py         request/response contracts
+  jobs.py            FIFO queue + workers, pause/drain for swaps
+  store.py           SQLite job archive and output retention
+  safety.py          NSFW + integrity filter
+  upsampler.py       local and OpenRouter prompt upsampling
+  images.py          base64/PIL helpers, pixel budget
+  main.py            FastAPI routes, auth, SPA hosting
+  static/            the built studio (produced by frontend/)
+frontend/            Vite + React + TypeScript studio
+  src/lib/api.ts     thin client over the generated OpenAPI types
+  tests/             Playwright critical path
+tests/               pytest suite (no GPU required)
 scripts/
   download_weights.py   pre-download the HF cache
+  dump_openapi.py       print the schema without starting a server
   serve.sh              start the API inside the conda env
   smoke_test.py         end-to-end check against a running API
   api_examples.sh       curl reference for every endpoint

@@ -28,3 +28,6 @@ dependencies:
       - pydantic-settings>=2.7.0
       - python-multipart>=0.0.20
       - httpx>=0.28.0
+      # Tests. The suite runs the whole HTTP layer under OIG_DRY_RUN, so it
+      # needs no GPU and no weights.
+      - pytest>=8.0.0

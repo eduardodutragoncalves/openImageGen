@@ -236,3 +236,8 @@ app/static/
 # Impeccable working directories
 .impeccable/review/
 .impeccable/mocks/
+.e2e-state/
+.e2e-output/
+frontend/openapi.json
+frontend/test-results/
+frontend/playwright-report/

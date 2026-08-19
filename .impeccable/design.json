@@ -1,0 +1,180 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-19T18:00:00Z",
+  "title": "Design System: openImageGen",
+  "extensions": {
+    "colorMeta": {
+      "instrument-black": {
+        "role": "neutral",
+        "displayName": "Instrument Black",
+        "purpose": "The page ground. Cool and near-neutral; deliberately not blue-black slate.",
+        "lightRegister": "#f5f7fa"
+      },
+      "ground-sunk": {
+        "role": "neutral",
+        "displayName": "Ground Sunk",
+        "purpose": "Inset surfaces only: the inside of an input.",
+        "lightRegister": "#e9edf2"
+      },
+      "ink": { "role": "neutral", "displayName": "Ink", "lightRegister": "#111111" },
+      "ink-muted": { "role": "neutral", "displayName": "Ink Muted", "lightRegister": "#4a5260" },
+      "ink-faint": {
+        "role": "neutral",
+        "displayName": "Ink Faint",
+        "purpose": "Tertiary annotation and placeholders. Both registers clear 4.5:1 on the surfaces they sit on, including inside inputs.",
+        "lightRegister": "#5f6875"
+      },
+      "crouwel-blue": {
+        "role": "primary",
+        "displayName": "Crouwel Blue",
+        "purpose": "The live plane: primary action, running job, selected control, active section.",
+        "lightRegister": "#0057ff"
+      },
+      "accent-ink": {
+        "role": "primary",
+        "displayName": "Accent Ink",
+        "purpose": "The same hue raised for legibility where the accent must be text or a hairline rather than a plane.",
+        "lightRegister": "#0043c9"
+      },
+      "caution-amber": {
+        "role": "secondary",
+        "displayName": "Caution Amber",
+        "purpose": "A job the content filter refused. Not an error colour.",
+        "lightRegister": "#8a5200"
+      },
+      "alarm-vermilion": {
+        "role": "secondary",
+        "displayName": "Alarm Vermilion",
+        "purpose": "A job that failed, and destructive intent on hover.",
+        "lightRegister": "#b52509"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Monumental Numeral",
+        "purpose": "Measured values read while they change: percentage complete, step count, model counts. Width axis at 125% is what makes them read as constructed rather than merely large."
+      },
+      "label": {
+        "displayName": "Region Label",
+        "purpose": "The heading of a region. Never sits above another heading."
+      },
+      "mono": {
+        "displayName": "Measurement",
+        "purpose": "Seeds, pixel dimensions, VRAM, job ids, step counts, timestamps. Never prose."
+      }
+    },
+    "shadows": [],
+    "motion": [
+      {
+        "name": "ease-state",
+        "value": "cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "The only easing in the system. Exponential ease-out on a 140ms colour and border transition, applied to state changes and nothing else."
+      },
+      {
+        "name": "duration-state",
+        "value": "140ms",
+        "purpose": "Control state changes. Nothing animates on entrance."
+      }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px", "purpose": "Model plate leaves the rail below this." },
+      { "name": "md", "value": "768px", "purpose": "Queue depth leaves the rail below this." },
+      { "name": "lg", "value": "1024px", "purpose": "VRAM tapes leave the rail below this so navigation survives." },
+      { "name": "xl", "value": "1280px", "purpose": "The studio's two columns; below this they stack." }
+    ],
+    "grid": {
+      "cell": "8px",
+      "major": "64px",
+      "rail": "56px",
+      "purpose": "Painted on the document ground as four repeating gradients. Regions stay transparent so the armature reads through the whole surface."
+    }
+  },
+  "components": [
+    {
+      "name": "Primary Action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Closes a form. Full width where it does, with the 45° mark pinned right.",
+      "html": "<button class=\"ds-btn-primary\"><span>Generate</span><span class=\"ds-diagonal\" aria-hidden=\"true\"></span></button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: space-between; gap: 12px; height: 40px; padding: 0 12px; background: #0057ff; color: #fff; border: 1px solid #0057ff; border-radius: 0; font: 600 11px/1.4 Archivo, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; cursor: pointer; transition: background-color 140ms cubic-bezier(0.16,1,0.3,1); } .ds-btn-primary:hover { background: #1a6bff; border-color: #1a6bff; } .ds-btn-primary:disabled { background: transparent; border-color: rgb(233 237 244 / 0.16); color: #737d8b; cursor: not-allowed; } .ds-diagonal { width: 14px; height: 14px; background-image: linear-gradient(45deg, transparent calc(50% - 0.5px), currentColor calc(50% - 0.5px), currentColor calc(50% + 0.5px), transparent calc(50% + 0.5px)); }"
+    },
+    {
+      "name": "Segment Bar",
+      "kind": "custom",
+      "description": "A quantity as discrete cells on the construction grid. The system's only progress form; a continuous rounded bar does not exist here.",
+      "html": "<div class=\"ds-segments\"><span class=\"on\"></span><span class=\"on\"></span><span class=\"on\"></span><span></span><span></span><span></span></div>",
+      "css": ".ds-segments { display: flex; gap: 2px; } .ds-segments span { width: 6px; height: 8px; border: 1px solid rgb(233 237 244 / 0.16); } .ds-segments span.on { background: #0057ff; border-color: #0057ff; }"
+    },
+    {
+      "name": "State Plate",
+      "kind": "chip",
+      "refersTo": "state-plate-running",
+      "description": "One word, one plate. Running is a filled plane; refused and failed are outlines in their own hue; queued and done are neutral.",
+      "html": "<span class=\"ds-plate ds-plate-running\">running</span> <span class=\"ds-plate ds-plate-refused\">refused</span>",
+      "css": ".ds-plate { display: inline-flex; align-items: center; height: 20px; padding: 0 6px; border: 1px solid; border-radius: 0; font: 600 10px/1 Archivo, sans-serif; letter-spacing: 0.12em; text-transform: uppercase; } .ds-plate-running { background: #0057ff; border-color: #0057ff; color: #fff; } .ds-plate-refused { background: transparent; border-color: #ffb020; color: #ffb020; }"
+    },
+    {
+      "name": "Active Section",
+      "kind": "nav",
+      "description": "The 45° mark taken structurally: the active item is a plane clipped to a parallelogram, not an underline.",
+      "html": "<a class=\"ds-nav is-active\"><span>Studio</span></a>",
+      "css": ".ds-nav { position: relative; display: flex; align-items: center; padding: 0 20px; height: 56px; color: #97a0ae; font: 600 11px/1 Archivo, sans-serif; letter-spacing: 0.14em; text-transform: uppercase; text-decoration: none; } .ds-nav.is-active { color: #fff; } .ds-nav.is-active::before { content: ''; position: absolute; inset: 0; background: #0057ff; clip-path: polygon(14px 0, 100% 0, calc(100% - 14px) 100%, 0 100%); } .ds-nav span { position: relative; }"
+    },
+    {
+      "name": "Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Sunk ground, hairline edge, blue edge and caret on focus.",
+      "html": "<input class=\"ds-field\" placeholder=\"Describe the image\">",
+      "css": ".ds-field { width: 100%; padding: 8px 10px; background: #050607; color: #e9edf4; border: 1px solid rgb(233 237 244 / 0.16); border-radius: 0; caret-color: #6b9dff; font: 400 14px/1.5 Archivo, sans-serif; } .ds-field::placeholder { color: #737d8b; } .ds-field:focus { outline: none; border-color: #0057ff; }"
+    },
+    {
+      "name": "Empty Field",
+      "kind": "custom",
+      "description": "A region with nothing in it yet carries the specimen's dotted texture, never an illustration.",
+      "html": "<div class=\"ds-dotted\">Nothing here yet</div>",
+      "css": ".ds-dotted { display: flex; align-items: center; justify-content: center; min-height: 160px; padding: 24px; border: 1px solid rgb(233 237 244 / 0.16); color: #97a0ae; font: 400 12px/1.5 Archivo, sans-serif; background-image: radial-gradient(rgb(233 237 244 / 0.16) 1px, transparent 1px); background-size: 8px 8px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Instrument Sheet",
+    "overview": "A sheet of engineering graph paper that reports on a machine. The construction grid is visible at all times and everything sits on it; readings hold fixed positions and never change width as they update. The system descends from Wim Crouwel's gridded type specimens by way of the instrument panel: the specimen supplies the armature, the hairline, the single flat accent plane and the 45 degree mark, and the console supplies what those elements are put to work saying. Density is high and deliberate, for someone who already knows the controls and uses them for hours. Dark is the default because of the room, not the category; the light register is the specimen sheet the world comes from and is fully supported.",
+    "keyCharacteristics": [
+      "The construction grid is always visible and every region aligns to its 8px cell.",
+      "Regions are divided by hairlines; boxes, radii and shadows do not exist.",
+      "Colour is spent on state and navigation, never on decoration.",
+      "Measurements are set in a grid-constructed mono with tabular figures.",
+      "One recurring mark, a 45 degree diagonal, appears on the primary action, the wordmark and the active section."
+    ],
+    "namedRules": [
+      {
+        "name": "The Live Plane Rule",
+        "rule": "A filled plane of Crouwel Blue means this is the thing happening now, or the thing you are about to do. Blue may also carry navigation, links and emphasis, but never fills a region merely to make it interesting, and two competing blue planes never appear in one region."
+      },
+      {
+        "name": "The Image Is The Subject Rule",
+        "rule": "Generated images are the most saturated thing on any screen; chrome stays inside the palette so no thumbnail competes with the interface."
+      },
+      {
+        "name": "The Two Alarms Rule",
+        "rule": "Amber means refused, vermilion means failed, and neither is used for anything else."
+      },
+      {
+        "name": "The Measurement Rule",
+        "rule": "Anything measured is set in Martian Mono with tabular figures. Prose is never mono, and a label is never mono to look technical."
+      },
+      {
+        "name": "The Label Is The Heading Rule",
+        "rule": "A region's small uppercase label is its heading. Nothing larger sits beneath it."
+      },
+      {
+        "name": "The Known Progress Rule",
+        "rule": "No indeterminate spinner exists in this system. The product always knows how far along it is, and where it genuinely does not, it says so in words."
+      }
+    ],
+    "notCanonized": [
+      "The big-number-over-small-label readout is recorded as a live measurement in a console, scoped to values that change; it is explicitly not sanctioned as a page scaffold, which is the hero-metric template the craft floor refuses.",
+      "No craft-floor refusal appears in the build, so nothing banned has been written into this system."
+    ]
+  }
+}
