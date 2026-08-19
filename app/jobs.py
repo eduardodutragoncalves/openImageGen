@@ -107,6 +107,14 @@ class JobQueue:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def list(self, limit: int = 50, status: JobState | None = None) -> list[Job]:
+        """Most recent jobs first, so a lost job id can be recovered."""
+        with self._lock:
+            jobs = [job for jid in self._order if (job := self._jobs.get(jid)) is not None]
+        if status is not None:
+            jobs = [job for job in jobs if job.state is status]
+        return list(reversed(jobs))[:limit]
+
     def position(self, job: Job) -> int | None:
         """0 means "next to be picked up"; None once it left the queue."""
         if job.state is not JobState.queued:

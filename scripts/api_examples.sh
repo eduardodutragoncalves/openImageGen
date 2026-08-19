@@ -16,6 +16,7 @@
 #   generate-wait <prompt> <out.png> [w] [h] generate, then poll until done and save the image
 #   edit <image> <prompt> <out.png>          POST /v1/images/edits/upload (multipart), poll, save
 #   edit-json <image> <prompt> <out.png>     POST /v1/images/edits (base64 JSON body), poll, save
+#   jobs [limit] [status]                    GET  /v1/jobs (find a lost job id)
 #   job <job_id> [wait_seconds]              GET  /v1/jobs/{id}
 #   job-image <job_id> <out.png> [index]     GET  /v1/jobs/{id}/image
 #   file <name> <out_path>                   GET  /v1/files/{name}
@@ -269,6 +270,17 @@ cmd_edit_json() {
   save_first_image "$job" "$out"
 }
 
+cmd_jobs() {
+  # GET /v1/jobs — recent jobs, newest first. Use it to find an id you no
+  # longer have; jobs live in memory, so this covers the running process only.
+  local limit="${1:-50}"
+  local status="${2:-}"
+  local args=(--get --data-urlencode "limit=$limit")
+  [[ -n "$status" ]] && args+=(--data-urlencode "status=$status")
+  run_curl -s "$BASE_URL/v1/jobs" "${args[@]}" "${auth_args[@]}" \
+    | { [[ "$PRINT_ONLY" == true ]] || (need_jq && jq .); }
+}
+
 cmd_job() {
   # GET /v1/jobs/{id} — status, progress and (once finished) the result.
   # ?wait=N long-polls up to N seconds instead of returning immediately.
@@ -301,7 +313,9 @@ cmd_file() {
 }
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the leading comment block: from line 2 up to the first line that is
+  # not a comment, then drop that line. Survives edits to the header.
+  sed -n '2,/^[^#]/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
 case "$COMMAND" in
@@ -312,6 +326,7 @@ case "$COMMAND" in
   generate-wait) cmd_generate_wait "$@" ;;
   edit) cmd_edit "$@" ;;
   edit-json) cmd_edit_json "$@" ;;
+  jobs) cmd_jobs "$@" ;;
   job) cmd_job "$@" ;;
   job-image) cmd_job_image "$@" ;;
   file) cmd_file "$@" ;;

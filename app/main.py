@@ -26,6 +26,7 @@ from .schemas import (
     JobState,
     JobStatusResponse,
     JobSubmitted,
+    JobSummary,
     ModelInfo,
     UpsampleMode,
 )
@@ -397,6 +398,36 @@ async def create_edit_upload(
     )
     references = _decode_references(body.images, settings)
     return _submit("edit", _build_payload(body, settings, references))
+
+
+@app.get("/v1/jobs", response_model=list[JobSummary], tags=["jobs"])
+def list_jobs(
+    limit: int = Query(default=50, ge=1, le=500),
+    status: JobState | None = Query(default=None, description="Filter by job status"),
+) -> list[JobSummary]:
+    """Recent jobs, newest first — how to find an id you no longer have.
+
+    Jobs live in memory only, so this covers the current process and whatever
+    has not yet been evicted by OIG_JOB_TTL_SECONDS.
+    """
+    assert state.queue is not None
+    summaries: list[JobSummary] = []
+    for job in state.queue.list(limit=limit, status=status):
+        payload = job.payload if isinstance(job.payload, dict) else {}
+        summaries.append(
+            JobSummary(
+                id=job.id,
+                status=job.state,
+                kind=job.kind,
+                created=job.created,
+                finished=job.finished,
+                progress=job.progress,
+                prompt=str(payload.get("prompt", ""))[:200],
+                image_count=len(job.result.images) if job.result else 0,
+                error=job.error,
+            )
+        )
+    return summaries
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobStatusResponse, tags=["jobs"])

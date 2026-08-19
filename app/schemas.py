@@ -105,6 +105,20 @@ class JobSubmitted(BaseModel):
     poll_url: str
 
 
+class JobSummary(BaseModel):
+    """One row of GET /v1/jobs. Deliberately excludes the image payload."""
+
+    id: str
+    status: JobState
+    kind: str
+    created: int
+    finished: int | None = None
+    progress: float | None = None
+    prompt: str
+    image_count: int = 0
+    error: str | None = None
+
+
 class JobStatusResponse(BaseModel):
     id: str
     status: JobState

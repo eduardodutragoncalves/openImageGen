@@ -95,6 +95,7 @@ To hide cards from the service, use `CUDA_VISIBLE_DEVICES` as usual —
 | `POST` | `/v1/images/generations` | Text-to-image |
 | `POST` | `/v1/images/edits` | Edit with 1..N reference images (base64/data URI) |
 | `POST` | `/v1/images/edits/upload` | Same, via multipart upload |
+| `GET` | `/v1/jobs` | Recent jobs, newest first (`?limit=`, `?status=`) |
 | `GET` | `/v1/jobs/{id}` | Job status (`?wait=30` blocks until it finishes) |
 | `GET` | `/v1/jobs/{id}/image` | Raw image bytes (`?index=N`) |
 | `GET` | `/v1/files/{name}` | File saved when `response_format="url"` |
@@ -128,6 +129,62 @@ curl -s -X POST localhost:8000/v1/images/generations \
 
 curl -s "localhost:8000/v1/jobs/<id>?wait=60" | jq '.status, .progress'
 curl -s "localhost:8000/v1/jobs/<id>/image" -o output.png
+```
+
+### Retrieving the image
+
+Submitting returns a job id, not an image. The image is fetched afterwards.
+
+```bash
+# 1. submit; keep the id from the response
+JOB=$(curl -s -X POST localhost:8000/v1/images/generations \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "a fox in a misty forest"}' | jq -r .id)
+
+# 2. wait for it (?wait=N long-polls up to N seconds; repeat until succeeded)
+curl -s "localhost:8000/v1/jobs/$JOB?wait=60" | jq '{status, progress}'
+
+# 3. download the bytes
+curl -s "localhost:8000/v1/jobs/$JOB/image" -o fox.png
+```
+
+Lost the id? List the recent jobs — they carry the prompt, so they are easy
+to tell apart:
+
+```bash
+curl -s localhost:8000/v1/jobs | jq '.[] | {id, status, prompt, image_count}'
+
+# only the finished ones
+curl -s "localhost:8000/v1/jobs?status=succeeded" | jq '.[] | {id, prompt}'
+```
+
+Jobs are held **in memory**, so the list covers the running process and
+expires after `OIG_JOB_TTL_SECONDS` (1h by default). Restarting the service
+discards them. For images that must outlive the process, ask for
+`"response_format": "url"` — they are written to `output/` and served from
+`/v1/files/{name}`:
+
+```bash
+curl -s -X POST localhost:8000/v1/images/generations \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "a fox", "response_format": "url"}'
+
+curl -s "localhost:8000/v1/jobs/$JOB" | jq -r '.result.images[].url'
+curl -s "localhost:8000/v1/files/<name>.png" -o fox.png
+```
+
+With `num_images > 1`, pick which one with `?index=N` (0-based):
+
+```bash
+curl -s "localhost:8000/v1/jobs/$JOB/image?index=1" -o fox_2.png
+```
+
+The same flow through the helper script:
+
+```bash
+scripts/api_examples.sh jobs                      # find the id
+scripts/api_examples.sh job <id>                  # check status
+scripts/api_examples.sh job-image <id> fox.png    # download
 ```
 
 ### Editing / multi-reference
@@ -238,6 +295,10 @@ scripts/api_examples.sh gpus
 
 # submit a generation and print the job id
 scripts/api_examples.sh generate "a fox in a misty forest"
+
+# list recent jobs to recover an id, then fetch its image
+scripts/api_examples.sh jobs
+scripts/api_examples.sh job-image <job_id> output/fox.png
 
 # submit, then poll until done and save the first image
 scripts/api_examples.sh generate-wait "a fox in a misty forest" output/fox.png
