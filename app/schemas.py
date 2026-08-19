@@ -191,6 +191,8 @@ class ModelInfo(BaseModel):
     transformer_device: str
     text_encoder_device: str
     cpu_offload: bool
+    # "bf16", or "nf4" when the weights are quantized on the way in to fit.
+    precision: str
     max_pixels: int
     capabilities: list[Capability]
     supports_local_upsample: bool
@@ -216,6 +218,9 @@ class CatalogEntry(BaseModel):
     default_guidance: float
     step_range: list[int]
     guidance_range: list[float]
+    # Footprints at the precision this machine would actually load, not at the
+    # checkpoint's nominal one.
+    precision: str
     transformer_vram_gb: float
     text_encoder_vram_gb: float
     total_vram_gb: float

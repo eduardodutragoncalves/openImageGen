@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     )
     # Skip model loading; useful to exercise the HTTP layer without a GPU.
     dry_run: bool = False
+    # Seconds per simulated step under OIG_DRY_RUN. A dry run that finishes
+    # instantly cannot exercise progress, queue position or the ETA, which are
+    # most of what the UI does while a job is alive.
+    dry_run_step_seconds: float = 0.08
 
     @field_validator("api_keys", "dev_origins", mode="before")
     @classmethod

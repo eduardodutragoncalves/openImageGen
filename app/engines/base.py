@@ -20,7 +20,7 @@ import torch
 from PIL import Image
 
 from ..config import Settings
-from ..devices import plan_placement
+from ..devices import available_gpus, plan_placement
 from ..jobs import RejectedContent
 from ..models_registry import ModelSpec
 from ..safety import IntegrityFilter, NsfwFilter
@@ -29,6 +29,21 @@ from ..upsampler import LocalUpsampler, OpenRouterUpsampler
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float], None]
+
+
+def choose_precision(spec: ModelSpec) -> str:
+    """bf16 when the card can hold it, NF4 when it cannot.
+
+    FLUX.1's 11.9B transformer is ~23.8GB at bf16, which does not fit a 24GB
+    card with any room for activations. Quantizing it on the way in is how
+    these models are actually run on consumer hardware, and it is the
+    difference between offering FLUX.1 and only appearing to.
+    """
+    if not spec.can_quantize:
+        return "bf16"
+    gpus = available_gpus()
+    largest = max((gpu[2] for gpu in gpus), default=0.0)
+    return "bf16" if largest >= spec.transformer_vram_gb + 2.0 else "nf4"
 
 
 @dataclass
@@ -44,9 +59,11 @@ class EngineResult:
 class BaseEngine(ABC):
     """Owns every model for one checkpoint and serializes access to the GPUs."""
 
-    def __init__(self, settings: Settings, spec: ModelSpec) -> None:
+    def __init__(self, settings: Settings, spec: ModelSpec, precision: str | None = None) -> None:
         self.settings = settings
         self.spec = spec
+        self.precision = precision or choose_precision(spec)
+        transformer_gb, encoder_gb = spec.footprints(self.precision)
         self.plan = plan_placement(
             spec.repo_id,
             transformer_device=settings.transformer_device,
@@ -55,10 +72,12 @@ class BaseEngine(ABC):
             max_pixels=settings.max_pixels,
             # The registry knows this checkpoint's real footprints; the
             # planner's substring table is only the fallback for unknown ones.
-            transformer_vram_gb=settings.transformer_vram_gb or spec.transformer_vram_gb,
-            text_encoder_vram_gb=settings.text_encoder_vram_gb or spec.text_encoder_vram_gb,
+            transformer_vram_gb=settings.transformer_vram_gb or transformer_gb,
+            text_encoder_vram_gb=settings.text_encoder_vram_gb or encoder_gb,
         )
-        logger.info("placement=%s: %s", self.plan.placement, self.plan.reason)
+        logger.info(
+            "placement=%s (%s): %s", self.plan.placement, self.precision, self.plan.reason
+        )
         self.pipe = None
         self._nsfw: NsfwFilter | None = None
         self._integrity: IntegrityFilter | None = None
@@ -156,6 +175,7 @@ class BaseEngine(ABC):
             "transformer_device": plan.transformer_device,
             "text_encoder_device": plan.text_encoder_device,
             "cpu_offload": plan.cpu_offload,
+            "precision": self.precision,
             "max_pixels": plan.max_pixels,
             "capabilities": list(spec.capabilities),
             "supports_local_upsample": self.supports_local_upsample,
@@ -271,7 +291,9 @@ class BaseEngine(ABC):
         timings["screen_input_s"] = time.perf_counter() - t0
 
         if settings.dry_run:
-            return self._dry_run_result(prompt, width, height, num_images, seed, timings)
+            return self._dry_run_result(
+                width, height, num_steps, num_images, seed, timings, progress
+            )
 
         # ---------------------------------------------------------- upsample
         revised_prompt: str | None = None
@@ -368,25 +390,41 @@ class BaseEngine(ABC):
     # --------------------------------------------------------------- helpers
     def _dry_run_result(
         self,
-        prompt: str,
         width: int,
         height: int,
+        num_steps: int,
         num_images: int,
         seed: int | None,
         timings: dict[str, float],
+        progress: ProgressCallback | None,
     ) -> EngineResult:
-        """Deterministic placeholder so the HTTP layer can be tested GPU-free."""
+        """Deterministic placeholder so the HTTP layer can be tested GPU-free.
+
+        It ticks through the same per-step progress a real run reports, at a
+        configurable pace: the queue, the estimate and every live state in the
+        UI are only reachable when a job takes measurable time.
+        """
         base_seed = seed if seed is not None else random.randrange(2**31)
+        total = max(1, num_steps * num_images)
+        interval = max(0.0, self.settings.dry_run_step_seconds)
+
+        t0 = time.perf_counter()
         images = []
         for index in range(num_images):
             rng = random.Random(base_seed + index)
-            color = (rng.randrange(256), rng.randrange(256), rng.randrange(256))
-            images.append(Image.new("RGB", (width, height), color))
+            colour = (rng.randrange(256), rng.randrange(256), rng.randrange(256))
+            for step in range(num_steps):
+                if interval:
+                    time.sleep(interval)
+                if progress is not None:
+                    progress((index * num_steps + step + 1) / total)
+            images.append(Image.new("RGB", (width, height), colour))
+
         return EngineResult(
             images=images,
             seeds=[base_seed + i for i in range(num_images)],
             width=width,
             height=height,
             revised_prompt=None,
-            timings={**timings, "denoise_s": 0.0},
+            timings={**timings, "denoise_s": round(time.perf_counter() - t0, 3)},
         )

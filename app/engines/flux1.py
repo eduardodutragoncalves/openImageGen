@@ -50,6 +50,26 @@ class Flux1Engine(BaseEngine):
         else:
             from diffusers import FluxPipeline as PipelineClass
 
+        quantize = self.precision == "nf4"
+        transformer_quant = encoder_quant = None
+        if quantize:
+            # diffusers and transformers each own their own config class; the
+            # transformer is a diffusers model and T5 is a transformers one.
+            from diffusers import BitsAndBytesConfig as DiffusersBnbConfig
+            from transformers import BitsAndBytesConfig as TransformersBnbConfig
+
+            transformer_quant = DiffusersBnbConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+            encoder_quant = TransformersBnbConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+            logger.info("quantizing %s to NF4 on the way in", self.spec.label)
+
         repo = self.spec.repo_id
         plan = self.plan
         dit_device = plan.transformer_device
@@ -64,6 +84,7 @@ class Flux1Engine(BaseEngine):
             subfolder="transformer",
             torch_dtype=torch.bfloat16,
             device_map=dit_map,
+            **({"quantization_config": transformer_quant} if transformer_quant else {}),
         )
 
         self._phase("loading autoencoder", 0.55)
@@ -76,11 +97,16 @@ class Flux1Engine(BaseEngine):
             repo, subfolder="text_encoder", torch_dtype=torch.bfloat16
         )
         text_encoder_2 = T5EncoderModel.from_pretrained(
-            repo, subfolder="text_encoder_2", torch_dtype=torch.bfloat16
+            repo,
+            subfolder="text_encoder_2",
+            torch_dtype=torch.bfloat16,
+            **({"quantization_config": encoder_quant} if encoder_quant else {}),
         )
         if not plan.cpu_offload:
             text_encoder = text_encoder.to(te_device)
-            text_encoder_2 = text_encoder_2.to(te_device)
+            # A 4-bit module is already placed by accelerate and refuses .to().
+            if not quantize:
+                text_encoder_2 = text_encoder_2.to(te_device)
 
         self._phase("loading tokenizers and scheduler", 0.90)
         tokenizer = CLIPTokenizer.from_pretrained(repo, subfolder="tokenizer")

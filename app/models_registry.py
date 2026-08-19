@@ -52,6 +52,11 @@ class ModelSpec:
     guidance_range: tuple[float, float]
     # Gated repos need an accepted licence on huggingface.co plus HF_TOKEN.
     gated: bool = False
+    # When bf16 will not fit the hardware, these are the footprints after
+    # on-the-fly NF4 quantization. None means we do not re-quantize this
+    # checkpoint — the FLUX.2 mirror already ships at 4-bit.
+    nf4_transformer_vram_gb: float | None = None
+    nf4_text_encoder_vram_gb: float | None = None
     notes: str = ""
     # Set on entries the operator typed in rather than ones we ship.
     custom: bool = False
@@ -72,6 +77,19 @@ class ModelSpec:
     @property
     def total_vram_gb(self) -> float:
         return self.transformer_vram_gb + self.text_encoder_vram_gb
+
+    @property
+    def can_quantize(self) -> bool:
+        return self.nf4_transformer_vram_gb is not None
+
+    def footprints(self, precision: str) -> tuple[float, float]:
+        """(transformer, text encoder) GB at the precision actually loaded."""
+        if precision == "nf4" and self.can_quantize:
+            return (
+                self.nf4_transformer_vram_gb,  # type: ignore[return-value]
+                self.nf4_text_encoder_vram_gb,  # type: ignore[return-value]
+            )
+        return self.transformer_vram_gb, self.text_encoder_vram_gb
 
 
 # --------------------------------------------------------------------- FLUX.2
@@ -176,6 +194,8 @@ _FLUX1: list[ModelSpec] = [
         default_guidance=0.0,
         step_range=(1, 12),
         guidance_range=(0.0, 0.0),
+        nf4_transformer_vram_gb=7.0,
+        nf4_text_encoder_vram_gb=3.5,
         notes="Ignores guidance entirely; the control is disabled for this model.",
     ),
     ModelSpec(
@@ -196,6 +216,8 @@ _FLUX1: list[ModelSpec] = [
         step_range=(1, 100),
         guidance_range=(0.0, 10.0),
         gated=True,
+        nf4_transformer_vram_gb=7.0,
+        nf4_text_encoder_vram_gb=3.5,
     ),
     ModelSpec(
         id="flux1-krea-dev",
@@ -215,6 +237,8 @@ _FLUX1: list[ModelSpec] = [
         step_range=(1, 100),
         guidance_range=(0.0, 10.0),
         gated=True,
+        nf4_transformer_vram_gb=7.0,
+        nf4_text_encoder_vram_gb=3.5,
     ),
     ModelSpec(
         id="flux1-kontext-dev",
@@ -234,6 +258,8 @@ _FLUX1: list[ModelSpec] = [
         step_range=(1, 100),
         guidance_range=(0.0, 10.0),
         gated=True,
+        nf4_transformer_vram_gb=7.0,
+        nf4_text_encoder_vram_gb=3.5,
         notes="One reference image at a time; multi-reference is FLUX.2 only.",
     ),
 ]

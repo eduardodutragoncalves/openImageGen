@@ -22,8 +22,9 @@ import time
 from dataclasses import dataclass, field
 
 from .config import Settings
-from .devices import plan_placement
+from .devices import available_gpus, plan_placement
 from .engines import BaseEngine, create_engine
+from .engines.base import choose_precision
 from .jobs import JobQueue
 from .models_registry import CATALOG, ModelSpec, by_id, spec_for_repo
 
@@ -246,6 +247,12 @@ class ModelManager:
         """
         entries = []
         current_id = self._engine.spec.id if self._engine is not None else None
+        gpus = available_gpus()
+        # Sequential offload still loads the transformer onto one card whole, so
+        # the largest single GPU is the real ceiling. The planner answers "how
+        # would this be placed", never "can this machine hold it" — asking it
+        # for feasibility marked a 113GB checkpoint runnable on a 24GB card.
+        largest_gb = max((gpu[2] for gpu in gpus), default=0.0)
         known = {spec.id for spec in CATALOG}
         specs = list(CATALOG)
         if self.spec.id not in known:
@@ -253,15 +260,33 @@ class ModelManager:
             specs.insert(0, self.spec)
 
         for spec in specs:
+            # Report the model as it would actually be loaded here, which for
+            # FLUX.1 on a consumer card means quantized.
+            precision = choose_precision(spec)
+            transformer_gb, encoder_gb = spec.footprints(precision)
             plan = plan_placement(
                 spec.repo_id,
                 transformer_device=self.settings.transformer_device,
                 text_encoder_device=self.settings.text_encoder_device,
                 cpu_offload=self.settings.cpu_offload,
                 max_pixels=self.settings.max_pixels,
-                transformer_vram_gb=spec.transformer_vram_gb,
-                text_encoder_vram_gb=spec.text_encoder_vram_gb,
+                transformer_vram_gb=transformer_gb,
+                text_encoder_vram_gb=encoder_gb,
             )
+            if not gpus:
+                runnable = False
+                reason = "no CUDA device detected"
+            elif largest_gb < transformer_gb + 1.5:
+                runnable = False
+                quantized = " even quantized to 4-bit" if precision == "nf4" else ""
+                reason = (
+                    f"the transformer alone needs ~{transformer_gb:.0f}GB{quantized} and the "
+                    f"largest GPU here has {largest_gb:.0f}GB, which no offloading gets around"
+                )
+            else:
+                runnable = True
+                reason = plan.reason
+
             entries.append(
                 {
                     "id": spec.id,
@@ -277,16 +302,17 @@ class ModelManager:
                     "default_guidance": spec.default_guidance,
                     "step_range": list(spec.step_range),
                     "guidance_range": list(spec.guidance_range),
-                    "transformer_vram_gb": spec.transformer_vram_gb,
-                    "text_encoder_vram_gb": spec.text_encoder_vram_gb,
-                    "total_vram_gb": round(spec.total_vram_gb, 1),
+                    "precision": precision,
+                    "transformer_vram_gb": transformer_gb,
+                    "text_encoder_vram_gb": encoder_gb,
+                    "total_vram_gb": round(transformer_gb + encoder_gb, 1),
                     "gated": spec.gated,
                     "notes": spec.notes,
                     "custom": spec.custom,
                     "loaded": spec.id == current_id,
                     "placement": plan.placement,
-                    "placement_reason": plan.reason,
-                    "runnable": plan.placement != "none",
+                    "placement_reason": reason,
+                    "runnable": runnable,
                     "max_pixels": plan.max_pixels,
                 }
             )
