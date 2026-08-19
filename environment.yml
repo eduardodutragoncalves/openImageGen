@@ -1,0 +1,30 @@
+name: openimagegen
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  # CUDA/torch come from pip so the wheels carry their own CUDA runtime;
+  # conda-forge's cudatoolkit is not used. Change the index URL below if your
+  # driver is older than what cu129 requires.
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu129
+      - torch==2.8.0
+      - torchvision==0.23.0
+      # FLUX.2 support landed in diffusers main; there is no release with it yet.
+      - git+https://github.com/huggingface/diffusers.git
+      - transformers>=4.56.1
+      - accelerate>=1.12.0
+      - bitsandbytes>=0.48.0
+      - safetensors>=0.4.5
+      - sentencepiece
+      - huggingface-hub>=0.35.0
+      - hf-transfer
+      - einops==0.8.1
+      - pillow>=11.0.0
+      - fastapi>=0.118.0
+      - "uvicorn[standard]>=0.37.0"
+      - pydantic>=2.11.0
+      - pydantic-settings>=2.7.0
+      - python-multipart>=0.0.20
+      - httpx>=0.28.0
