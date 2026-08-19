@@ -292,6 +292,13 @@ allocator fragmentation.
 `OIG_TRANSFORMER_DEVICE`, `OIG_TEXT_ENCODER_DEVICE`, `OIG_CPU_OFFLOAD` or the
 `*_VRAM_GB` settings. Note: setting any of these turns off auto-detection.
 
+**`conda.sh: line NN: PS1: unbound variable`** — fixed in `serve.sh`. conda's
+shell hook dereferences `$PS1`, which is unset in the non-interactive shell a
+script runs in, so `set -u` aborted the activation. It only surfaced when the
+environment was *already* active in the calling shell, because that makes
+`conda activate` take its reactivation path. The script now relaxes `nounset`
+around the activation.
+
 **`No prebuilt binary for CUDA 12.9`** — a bitsandbytes warning; it falls back
 to the 12.8 binary and works normally.
 

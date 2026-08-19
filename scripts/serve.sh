@@ -6,9 +6,19 @@ ENV_NAME="${OIG_CONDA_ENV:-openimagegen}"
 HOST="${OIG_HOST:-0.0.0.0}"
 PORT="${OIG_PORT:-8000}"
 
+if ! command -v conda >/dev/null 2>&1; then
+  echo "conda not found on PATH. Install Miniconda/Anaconda, or activate the" >&2
+  echo "environment yourself and run: uvicorn app.main:app --host $HOST --port $PORT" >&2
+  exit 1
+fi
+
+# conda's shell hook dereferences $PS1, which is unset in a non-interactive
+# shell, so `set -u` would abort here. Relax nounset just for the activation.
+set +u
 # shellcheck disable=SC1091
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$ENV_NAME"
+set -u
 
 cd "$(dirname "$0")/.."
 
