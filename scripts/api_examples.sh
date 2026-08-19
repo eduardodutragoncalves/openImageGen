@@ -21,8 +21,9 @@
 #   file <name> <out_path>                   GET  /v1/files/{name}
 #
 # Environment:
-#   BASE_URL   API base URL (default: http://localhost:8000)
-#   API_KEY    sent as X-API-Key when set; omitted otherwise
+#   BASE_URL      API base URL (default: http://localhost:8000)
+#   API_KEY       sent as X-API-Key when set; omitted otherwise
+#   POLL_TIMEOUT  seconds before the pollers give up (default: 3600)
 #
 # Examples:
 #   scripts/api_examples.sh health
@@ -36,6 +37,8 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:8000}"
 API_KEY="${API_KEY:-}"
+# Upper bound on how long the pollers wait before giving up, in seconds.
+POLL_TIMEOUT="${POLL_TIMEOUT:-3600}"
 PRINT_ONLY=false
 
 if [[ "${1:-}" == "--print-only" ]]; then
@@ -47,6 +50,21 @@ COMMAND="${1:-}"
 shift || true
 
 # ------------------------------------------------------------------- helpers
+# A RETURN trap inside a function only fires with `set -T`, so temp files are
+# tracked here and removed by a single EXIT trap, which always runs.
+TMP_FILES=()
+cleanup() { [[ ${#TMP_FILES[@]} -gt 0 ]] && rm -f "${TMP_FILES[@]}"; return 0; }
+trap cleanup EXIT
+
+# Registers a temp file for cleanup. Takes the name of the variable to fill,
+# because assigning through $(...) would run in a subshell and the append to
+# TMP_FILES would be lost with it.
+new_tmp() {
+  local -n _out_path="$1"
+  _out_path=$(mktemp "${TMPDIR:-/tmp}/oig-$2.XXXXXX")
+  TMP_FILES+=("$_out_path")
+}
+
 auth_args=()
 if [[ -n "$API_KEY" ]]; then
   auth_args=(-H "X-API-Key: $API_KEY")
@@ -69,25 +87,56 @@ need_jq() {
   }
 }
 
-b64_of() {
-  # Portable base64 -w0 (GNU) vs -b 0 (BSD/macOS) without depending on either flag.
-  base64 <"$1" | tr -d '\n'
+b64_to_file() {
+  # Portable base64 -w0 (GNU) vs -b 0 (BSD/macOS) without depending on either
+  # flag. Writes to a file rather than returning the string: a 1MP PNG is
+  # ~1.9MB of base64, well past ARG_MAX once it is passed as an argument.
+  base64 <"$1" | tr -d '\n' >"$2"
+}
+
+# Extracts the job id from a submission response, or aborts with whatever the
+# server said. Without this, a failed POST yields the literal "null" and the
+# poller spins forever against /v1/jobs/null.
+job_id_or_die() {
+  local submitted="$1" job_id
+  need_jq
+  job_id=$(printf '%s' "$submitted" | jq -r '.id // empty' 2>/dev/null || true)
+  if [[ -z "$job_id" ]]; then
+    echo "submission failed; server said:" >&2
+    printf '%s\n' "${submitted:-<empty response>}" >&2
+    exit 1
+  fi
+  printf '%s' "$job_id"
 }
 
 poll_job() {
   local job_id="$1"
+  local deadline=$(( SECONDS + POLL_TIMEOUT ))
   need_jq
   echo "polling /v1/jobs/$job_id ..." >&2
   while true; do
+    if (( SECONDS > deadline )); then
+      echo "giving up after ${POLL_TIMEOUT}s waiting for job $job_id" >&2
+      return 1
+    fi
+
     local job
     job=$(run_curl -s "$BASE_URL/v1/jobs/$job_id" --get --data-urlencode "wait=30" "${auth_args[@]}")
     [[ "$PRINT_ONLY" == true ]] && return 0
+
     local status
-    status=$(echo "$job" | jq -r '.status')
-    echo "  status=$status progress=$(echo "$job" | jq -r '.progress // "null"')" >&2
+    status=$(printf '%s' "$job" | jq -r '.status // empty' 2>/dev/null || true)
+    if [[ -z "$status" ]]; then
+      # 404, an error body, or no body at all: never retry this forever.
+      echo "unexpected response while polling job $job_id:" >&2
+      printf '%s\n' "${job:-<empty response>}" >&2
+      return 1
+    fi
+
+    echo "  status=$status progress=$(printf '%s' "$job" | jq -r '.progress // "null"')" >&2
     case "$status" in
       succeeded|failed|rejected)
-        echo "$job"
+        printf '%s' "$job"
         return 0
         ;;
     esac
@@ -143,19 +192,19 @@ cmd_generate_wait() {
   local submitted
   submitted=$(cmd_generate "$prompt" "$width" "$height")
   [[ "$PRINT_ONLY" == true ]] && return 0
-  echo "$submitted" | jq .
+  printf '%s\n' "$submitted" | jq .
 
-  local job_id
-  job_id=$(echo "$submitted" | jq -r '.id')
-  local job
-  job=$(poll_job "$job_id")
-  echo "$job" | jq 'del(.result.images[].b64_json)'  # keep the terminal readable
+  local job_id job
+  job_id=$(job_id_or_die "$submitted")
+  job=$(poll_job "$job_id") || return 1
+  # Drop the base64 payload so the terminal stays readable.
+  printf '%s' "$job" | jq 'del(.result.images[]?.b64_json)'
 
   local status
-  status=$(echo "$job" | jq -r '.status')
+  status=$(printf '%s' "$job" | jq -r '.status')
   if [[ "$status" != "succeeded" ]]; then
     echo "job did not succeed (status=$status)" >&2
-    exit 1
+    return 1
   fi
   save_first_image "$job" "$out"
 }
@@ -175,13 +224,12 @@ cmd_edit() {
     "${auth_args[@]}")
   [[ "$PRINT_ONLY" == true ]] && return 0
   need_jq
-  echo "$submitted" | jq .
+  printf '%s\n' "$submitted" | jq .
 
-  local job_id
-  job_id=$(echo "$submitted" | jq -r '.id')
-  local job
-  job=$(poll_job "$job_id")
-  echo "$job" | jq 'del(.result.images[].b64_json)'
+  local job_id job
+  job_id=$(job_id_or_die "$submitted")
+  job=$(poll_job "$job_id") || return 1
+  printf '%s' "$job" | jq 'del(.result.images[]?.b64_json)'
   save_first_image "$job" "$out"
 }
 
@@ -189,27 +237,35 @@ cmd_edit_json() {
   # POST /v1/images/edits — same as above, but with the reference image
   # inlined as base64 in a JSON body. Useful when scripting without curl's
   # multipart support, or when the caller already has the bytes in memory.
+  #
+  # The payload never travels through argv: base64 of a 1MP PNG is ~1.9MB,
+  # which exceeds ARG_MAX. It goes to a temp file, jq reads it with --rawfile,
+  # and curl posts it with --data-binary @file.
   local image="${1:?usage: edit-json <image> <prompt> <out.png>}"
   local prompt="${2:?usage: edit-json <image> <prompt> <out.png>}"
   local out="${3:?usage: edit-json <image> <prompt> <out.png>}"
   need_jq
 
-  local b64
-  b64=$(b64_of "$image")
+  local tmp_b64 tmp_json
+  new_tmp tmp_b64 b64
+  new_tmp tmp_json body
+
+  b64_to_file "$image" "$tmp_b64"
+  jq -n --arg p "$prompt" --rawfile img "$tmp_b64" \
+    '{prompt: $p, images: [$img], match_image_size: 0}' >"$tmp_json"
+
   local submitted
   submitted=$(run_curl -s -X POST "$BASE_URL/v1/images/edits" \
     -H 'Content-Type: application/json' \
     "${auth_args[@]}" \
-    -d "$(jq -n --arg p "$prompt" --arg img "$b64" \
-      '{prompt: $p, images: [$img], match_image_size: 0}')")
+    --data-binary "@$tmp_json")
   [[ "$PRINT_ONLY" == true ]] && return 0
-  echo "$submitted" | jq .
+  printf '%s\n' "$submitted" | jq .
 
-  local job_id
-  job_id=$(echo "$submitted" | jq -r '.id')
-  local job
-  job=$(poll_job "$job_id")
-  echo "$job" | jq 'del(.result.images[].b64_json)'
+  local job_id job
+  job_id=$(job_id_or_die "$submitted")
+  job=$(poll_job "$job_id") || return 1
+  printf '%s' "$job" | jq 'del(.result.images[]?.b64_json)'
   save_first_image "$job" "$out"
 }
 
