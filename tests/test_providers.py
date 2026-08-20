@@ -306,6 +306,46 @@ class TestRunwareCatalog:
         assert model.makes_images is True
         assert model.reads_images is True
 
+    def test_the_namespaced_taxonomy_is_understood(self, monkeypatch):
+        """Runware's own vocabulary is namespaced — io: for what goes in and
+        out, op: for what the model does, form: for what kind of artefact it
+        is. Matching the bare word against `io:text-to-image` would classify
+        every model as generating nothing, and the tab would come back empty.
+        """
+        catalog = [
+            dict(
+                RUNWARE_RESULTS[0],
+                air="xai:grok-imagine@image-2.0",
+                capabilities=["io:text-to-image", "io:image-to-image", "form:checkpoint"],
+            ),
+            dict(
+                RUNWARE_RESULTS[0],
+                air="zai:glm@5.3",
+                capabilities=["io:text-to-text", "form:checkpoint"],
+            ),
+            dict(
+                RUNWARE_RESULTS[0],
+                air="lightricks:ltx@2.5-fast",
+                capabilities=["io:text-to-video", "io:image-to-video", "form:checkpoint"],
+            ),
+            dict(
+                RUNWARE_RESULTS[0],
+                air="topazlabs:wonder@3.5",
+                capabilities=["op:upscale", "form:checkpoint"],
+            ),
+        ]
+        provider, _ = _runware(monkeypatch, _catalog(catalog))
+        models = {model.id: model for model in provider.search_catalog(kind="all").models}
+
+        assert models["xai:grok-imagine@image-2.0"].makes_images is True
+        assert models["xai:grok-imagine@image-2.0"].reads_images is True
+        # A text model, a video model and an upscaler all return something, but
+        # none of them returns a picture of what you asked for.
+        assert models["zai:glm@5.3"].makes_images is False
+        assert models["lightricks:ltx@2.5-fast"].makes_images is False
+        assert models["topazlabs:wonder@3.5"].makes_images is False
+        assert models["topazlabs:wonder@3.5"].reads_images is True
+
     def test_the_architecture_is_carried_into_what_the_operator_reads(self, monkeypatch):
         provider, _ = _runware(monkeypatch, _catalog(RUNWARE_RESULTS))
         model = provider.search_catalog(kind="all").models[0]

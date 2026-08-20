@@ -27,24 +27,44 @@ from .base import ModelPage, Provider, ProviderError, RemoteModel
 
 logger = logging.getLogger(__name__)
 
-# Runware quotes capabilities in more than one register across its catalog
-# ("text-to-image", "textToImage", "Text to Image"), so they are compared with
-# the punctuation and case taken out.
+# Runware's capability taxonomy is namespaced — `io:` for what a model takes
+# and returns, `op:` for what it does, `form:` for what kind of artefact it is
+# (https://content.runware.ai/capabilities). Not every surface quotes the
+# namespace, and the spelling varies between them ("text-to-image",
+# "textToImage"), so a capability is reduced to its bare suffix before it is
+# compared: both `io:text-to-image` and `textToImage` become `texttoimage`.
+_NAMESPACE = re.compile(r"^[a-z]+:")
 _SQUASH = re.compile(r"[^a-z0-9]")
 
 # Capabilities that mean "give it a prompt and it produces a picture".
 # Deliberately excludes the utility heads — upscale, background removal,
-# vectorise — which return an image but ignore what you asked for.
+# vectorise — which return an image but ignore what you asked for, and the
+# video and 3D heads, which return something this application cannot show.
 MAKES_IMAGES = frozenset(
-    {"texttoimage", "imagetoimage", "inpainting", "outpainting", "edit"}
+    {
+        "texttoimage",
+        "imagetoimage",
+        "edit",
+        "inpaint",
+        "inpainting",
+        "extend",
+        "outpaint",
+        "outpainting",
+    }
 )
 # Capabilities that mean the model takes an image in.
 READS_IMAGES = frozenset(
     {
         "imagetoimage",
-        "inpainting",
-        "outpainting",
+        "imagetotext",
+        "imagetovideo",
+        "imageto3d",
         "edit",
+        "inpaint",
+        "inpainting",
+        "extend",
+        "outpaint",
+        "outpainting",
         "upscale",
         "removebackground",
         "vectorize",
@@ -58,7 +78,11 @@ GENERATOR_CATEGORY = "checkpoint"
 
 
 def _squash(values) -> set[str]:
-    return {_SQUASH.sub("", str(value).lower()) for value in values or ()}
+    """Capabilities as bare comparable tokens, namespace and punctuation gone."""
+    return {
+        _SQUASH.sub("", _NAMESPACE.sub("", str(value).lower().strip()))
+        for value in values or ()
+    }
 
 
 def _to_data_uri(image: Image.Image, max_side: int = 1536) -> str:
