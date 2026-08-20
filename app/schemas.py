@@ -304,6 +304,10 @@ class ProviderInfoResponse(BaseModel):
     configured: bool
     key_source: Literal["none", "env", "stored"]
     catalog_is_public: bool
+    # Which catalog filters this provider can honour. A host of image
+    # checkpoints has no text models to offer, so the tab does not pretend it
+    # does.
+    kinds: list[str]
 
 
 class RemoteModelInfo(BaseModel):
@@ -323,10 +327,12 @@ class RemoteModelInfo(BaseModel):
 
 class RemoteModelPage(BaseModel):
     models: list[RemoteModelInfo]
+    # How many matched, which may be more than fit in this page.
     total: int
     # How many the provider offers before the modality filter, so the UI can
     # say "11 image generators out of 414" rather than implying that is all
-    # there is.
+    # there is. Zero when the catalog is searched rather than enumerated and
+    # no such total exists.
     catalog_total: int
 
 

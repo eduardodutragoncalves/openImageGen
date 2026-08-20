@@ -31,7 +31,7 @@ from .engines import EngineResult
 from .images import InvalidImage, decode_image, encode_image, fit_to_budget, mime_type
 from .jobs import Job, JobQueue, QueueFull
 from .model_manager import ModelBusy, ModelManager, UnknownModel
-from .providers import ProviderError, ProviderRegistry, search as search_models
+from .providers import Provider, ProviderError, ProviderRegistry
 from .schemas import (
     CatalogEntry,
     EditRequest,
@@ -875,6 +875,13 @@ def _providers() -> ProviderRegistry:
     return state.providers
 
 
+def _provider(provider_id: str) -> Provider:
+    try:
+        return _providers().get(provider_id)
+    except ProviderError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/v1/providers", response_model=list[ProviderInfoResponse], tags=["providers"])
 def list_providers(owner: str = Depends(require_owner)) -> list[ProviderInfoResponse]:
     """Remote catalogs this server can reach. Keys are never returned."""
@@ -927,30 +934,34 @@ def list_provider_models(
     OpenRouter lists, only the ones that actually output an image can generate
     one here.
     """
-    registry = _providers()
+    provider = _provider(provider_id)
+    if kind not in provider.kinds:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{provider.label} has no {kind!r} catalog to search",
+        )
+    # A catalog that cannot be read without a credential says so plainly, so
+    # the tab can offer the key field instead of an error.
+    if not provider.catalog_is_public and not provider.configured:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{provider.label}'s catalog needs an API key. Add one below.",
+        )
     try:
-        models = registry.get(provider_id).list_models()
+        page = provider.search_catalog(
+            query=q, kind=kind, limit=limit, include_routers=include_routers
+        )
     except ProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    catalog_total = len(models)
-    if not include_routers:
-        models = [model for model in models if not model.is_router]
-    if kind == "image":
-        models = [model for model in models if model.makes_images]
-    elif kind == "text":
-        models = [model for model in models if "text" in model.output_modalities]
-
-    models = search_models(models, q)
-    pinned = {entry.key for entry in registry.pinned()}
-    page = models[:limit]
+    pinned = {entry.key for entry in _providers().pinned()}
     return RemoteModelPage(
         models=[
             RemoteModelInfo(**model.as_dict(), pinned=f"{provider_id}:{model.id}" in pinned)
-            for model in page
+            for model in page.models
         ],
-        total=len(models),
-        catalog_total=catalog_total,
+        total=page.total,
+        catalog_total=page.catalog_total,
     )
 
 
@@ -969,18 +980,19 @@ def list_pinned(owner: str = Depends(require_owner)) -> list[PinnedModelInfo]:
 def pin_model(
     provider_id: str, body: PinRequest, owner: str = Depends(require_owner)
 ) -> PinnedModelInfo:
-    registry = _providers()
+    provider = _provider(provider_id)
+    # Resolved against the provider rather than taken from the browser: the
+    # label and the capabilities decide what the compose form will allow.
     try:
-        models = registry.get(provider_id).list_models()
+        model = provider.get_model(body.model_id)
     except ProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    model = next((entry for entry in models if entry.id == body.model_id), None)
     if model is None:
         raise HTTPException(
             status_code=404, detail=f"{provider_id} does not list {body.model_id!r}"
         )
-    return PinnedModelInfo(**registry.pin(provider_id, model).as_dict())
+    return PinnedModelInfo(**_providers().pin(provider_id, model).as_dict())
 
 
 @app.delete("/v1/providers/pinned", status_code=204, tags=["providers"])

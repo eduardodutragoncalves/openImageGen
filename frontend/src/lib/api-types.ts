@@ -402,6 +402,10 @@ export interface components {
             num_images: number;
             /** @default none */
             upsample_prompt: components["schemas"]["UpsampleMode"];
+            /** Upsample Model */
+            upsample_model?: string | null;
+            /** Model */
+            model?: string | null;
             /** Match Image Size */
             match_image_size?: number | null;
             /**
@@ -939,6 +943,8 @@ export interface components {
             key_source: "none" | "env" | "stored";
             /** Catalog Is Public */
             catalog_is_public: boolean;
+            /** Kinds */
+            kinds: string[];
         };
         /** ProviderKeyRequest */
         ProviderKeyRequest: {

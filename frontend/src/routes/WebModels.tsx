@@ -21,6 +21,11 @@ import { IconCheck, IconClose, IconKey, IconSearch } from "../components/Icons";
  * and only a handful of them output an image, so the default view is the
  * handful. Pinning one makes it a real generation target in the compose form,
  * alongside the checkpoint on the GPUs.
+ *
+ * Providers differ in how much of that work they do themselves — one catalog
+ * arrives whole and is filtered here, another is far too large for that and is
+ * searched where it lives — so the page reads what it is given rather than
+ * assuming a shape.
  */
 export function WebModels() {
   const providers = useProviders();
@@ -29,7 +34,23 @@ export function WebModels() {
   const [kind, setKind] = useState<"image" | "text" | "all">("image");
 
   const provider = (providers.data ?? []).find((entry) => entry.id === providerId);
-  const models = useProviderModels(providerId, { q: query, kind, limit: 80 });
+  // Not every provider has every kind of model. Runware hosts image
+  // checkpoints and nothing else, so asking it for text models would be asking
+  // for an empty list.
+  const kinds = provider?.kinds ?? ["image", "text", "all"];
+  const shownKind = kinds.includes(kind) ? kind : "image";
+  // A catalog that cannot be read without a credential is not an error state,
+  // it is a step: show the key field and say so.
+  const needsKey = Boolean(provider && !provider.catalog_is_public && !provider.configured);
+
+  const models = useProviderModels(
+    providerId,
+    { q: query, kind: shownKind, limit: 80 },
+    !needsKey,
+  );
+  // A catalog with no total to report is one that was searched, not listed:
+  // there is no "all of it" to have shown.
+  const searched = models.data ? models.data.catalog_total === 0 : false;
   const pinned = usePinned();
   const pin = usePin();
   const unpin = useUnpin();
@@ -58,7 +79,10 @@ export function WebModels() {
           <button
             key={entry.id}
             type="button"
-            onClick={() => setProviderId(entry.id)}
+            onClick={() => {
+              setProviderId(entry.id);
+              setQuery("");
+            }}
             aria-pressed={entry.id === providerId}
             className={`flex h-9 items-center gap-2 border px-3 text-[11px] font-semibold uppercase tracking-[0.1em] transition-colors ${
               entry.id === providerId
@@ -95,40 +119,48 @@ export function WebModels() {
               ["text", "text models"],
               ["all", "everything"],
             ] as const
-          ).map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setKind(value)}
-              aria-pressed={kind === value}
-              className={`h-9 border px-3 text-[10px] font-semibold uppercase tracking-[0.1em] transition-colors ${
-                kind === value
-                  ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--ink-on-accent)]"
-                  : "border-[var(--rule)] text-[var(--ink-muted)] hover:border-[var(--rule-strong)] hover:text-[var(--ink)]"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
+          )
+            .filter(([value]) => kinds.includes(value))
+            .map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setKind(value)}
+                aria-pressed={shownKind === value}
+                className={`h-9 border px-3 text-[10px] font-semibold uppercase tracking-[0.1em] transition-colors ${
+                  shownKind === value
+                    ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--ink-on-accent)]"
+                    : "border-[var(--rule)] text-[var(--ink-muted)] hover:border-[var(--rule-strong)] hover:text-[var(--ink)]"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
         </div>
       </div>
 
       {models.data ? (
         <p className="mb-2 text-[11px] text-[var(--ink-faint)]">
-          {kind === "image" ? (
-            <>
-              <span className="font-mono tabular text-[var(--ink-muted)]">
-                {models.data.total}
-              </span>{" "}
-              of {models.data.catalog_total} models on {provider?.label} can output an
-              image.
-            </>
+          <span className="font-mono tabular text-[var(--ink-muted)]">
+            {models.data.total}
+          </span>{" "}
+          {!searched ? (
+            shownKind === "image" ? (
+              <>
+                of {models.data.catalog_total} models on {provider?.label} can output an
+                image.
+              </>
+            ) : (
+              <>of {models.data.catalog_total} shown.</>
+            )
           ) : (
+            // A searched catalog has no total to be a fraction of: the size
+            // of the whole of Runware is not a number anyone could act on.
             <>
-              <span className="font-mono tabular text-[var(--ink-muted)]">
-                {models.data.total}
-              </span>{" "}
-              of {models.data.catalog_total} shown.
+              matched on {provider?.label}
+              {models.data.total > models.data.models.length
+                ? `, showing the first ${models.data.models.length}. Narrow the search to see the rest.`
+                : "."}
             </>
           )}
         </p>
@@ -142,7 +174,11 @@ export function WebModels() {
         </p>
       ) : null}
 
-      {models.isLoading ? (
+      {needsKey ? (
+        <p className="border border-[var(--rule)] px-3 py-6 text-center text-xs text-[var(--ink-muted)]">
+          {provider?.label}&rsquo;s catalog is not public. Add a key above to browse it.
+        </p>
+      ) : models.isLoading ? (
         <p className="text-xs text-[var(--ink-muted)]">Reading the catalog…</p>
       ) : (
         <RemoteModelList
@@ -150,7 +186,9 @@ export function WebModels() {
           emptyLabel={
             query
               ? `Nothing on ${provider?.label} matches “${query}”.`
-              : "This provider lists nothing of that kind."
+              : searched
+                ? `${provider?.label}'s catalog is too large to list. Search it by name or AIR id.`
+                : "This provider lists nothing of that kind."
           }
           action={(model) =>
             model.pinned ? (

@@ -69,10 +69,15 @@ class Settings(BaseSettings):
     # resident on the text-encoder GPU, so it costs no extra VRAM.
     enable_integrity_filter: bool = False
 
-    # ------------------------------------------------------------ upsampling
+    # ------------------------------------------------- providers / web models
+    # A key set through the studio is stored under state_dir and wins over
+    # these; neither has to be set for the server to start.
     openrouter_api_key: str | None = None
     openrouter_model: str = "mistralai/pixtral-large-2411"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    runware_api_key: str | None = None
+    runware_base_url: str = "https://api.runware.ai/v1"
 
     # ------------------------------------------------------------- retention
     # Generated files outlive the job record, so without a cap the gallery

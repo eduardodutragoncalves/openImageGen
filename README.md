@@ -340,8 +340,19 @@ reaches a provider's catalog over HTTP, and a model you pin there becomes a
 target in the compose form next to the resident checkpoint — no VRAM, no swap,
 billed by the provider instead of by your electricity.
 
-OpenRouter is the provider implemented today. Its catalog is public, so the tab
-is browsable before any key is set; generating needs one.
+| Provider | Catalog | Reads without a key | Model ids |
+| --- | --- | --- | --- |
+| **OpenRouter** | ~400 models, fetched whole and filtered here | yes | `google/gemini-3-pro-image` |
+| **Runware** | a GPU marketplace mirroring civitai — searched, never listed | no | AIR: `bfl:flux@2-dev`, `civitai:305149@392545` |
+
+Both answer the same three questions — what do you have, which of it makes
+images, and can you make one — so the tab, the pin list and the compose form do
+not know which is which. What differs is how the catalog is read.
+
+### OpenRouter
+
+Its catalog is public, so the tab is browsable before any key is set;
+generating needs one.
 
 **The filter is the point.** OpenRouter lists hundreds of models and only a
 handful of them can emit an image. The default view is that handful, taken from
@@ -357,6 +368,31 @@ curl -s "localhost:8000/v1/providers/openrouter/models?kind=image" \
 chosen from — and `kind=all` drops the filter entirely. Meta-routers such as
 `openrouter/auto` are excluded unless `include_routers=true`, since which model
 answers is decided per request.
+
+### Runware
+
+Runware is a GPU marketplace: FLUX, SDXL, Qwen and Seedream alongside a mirror
+of civitai. That scale changes how the catalog works. There are far too many
+models to fetch and filter here, so **every query is searched where it lives**
+— `q` becomes Runware's own `modelSearch`, which matches a name, a description
+or an AIR id — and the page reports how many matched rather than a fraction of
+a whole that has no meaning:
+
+```bash
+curl -s "localhost:8000/v1/providers/runware/models?q=flux&kind=image" \
+  -H "X-API-Key: $KEY" | jq '{shown: (.models|length), matched: .total}'
+```
+
+`kind=image` narrows the search to checkpoints, which are the only entries you
+can generate with — the rest of the catalog is LoRAs, VAEs and embeddings that
+attach to one. `kind=all` drops that filter; there is no `kind=text`, because
+Runware hosts no text models and the tab does not offer a filter that would
+only ever come back empty.
+
+Whether a Runware model takes a reference image comes from its declared
+capabilities. An entry that declares none — much of the civitai mirror — is
+treated as text-to-image only, so an edit is refused here rather than paid for
+and rejected there.
 
 ### Pinning, and generating
 
@@ -383,8 +419,9 @@ encoder, which has nothing to do with a remote model. Use `"openrouter"`.
 
 ### The key
 
-The credential can come from `OIG_OPENROUTER_API_KEY` or be set in the tab. A
-key set in the tab wins, is written `0600` to `providers.json` under
+Each provider has its own. The credential can come from the environment —
+`OIG_OPENROUTER_API_KEY`, `OIG_RUNWARE_API_KEY` — or be set in the tab. A key
+set in the tab wins, is written `0600` to `providers.json` under
 `OIG_STATE_DIR`, and survives a restart without ever entering the repository.
 
 **It is never sent back.** `GET /v1/providers` answers `configured: true` and
@@ -437,7 +474,7 @@ cd frontend && npm run schema
 ## Tests
 
 ```bash
-pytest tests/                      # 46 checks, no GPU: runs under OIG_DRY_RUN
+pytest tests/                      # 67 checks, no GPU: runs under OIG_DRY_RUN
 cd frontend && npm run test:e2e    # the critical path in a real browser
 ```
 
@@ -529,6 +566,7 @@ app/
   providers/
     base.py          the Provider contract, catalog filtering, search
     openrouter.py    catalog, generation and prompt rewriting over HTTP
+    runware.py       modelSearch and imageInference over its task API
     registry.py      credentials (0600, server-side) and pinned models
   images.py          base64/PIL helpers, pixel budget
   main.py            FastAPI routes, auth, SPA hosting

@@ -18,11 +18,20 @@ from pathlib import Path
 from ..config import Settings
 from .base import Provider, ProviderError, RemoteModel
 from .openrouter import OpenRouterProvider
+from .runware import RunwareProvider
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_CLASSES: dict[str, type[Provider]] = {
     OpenRouterProvider.id: OpenRouterProvider,
+    RunwareProvider.id: RunwareProvider,
+}
+
+# Where each provider's credential and endpoint live in Settings, for the
+# operators who would rather keep them in the environment than in the UI.
+ENV_SETTINGS: dict[str, tuple[str, str]] = {
+    OpenRouterProvider.id: ("openrouter_api_key", "openrouter_base_url"),
+    RunwareProvider.id: ("runware_api_key", "runware_base_url"),
 }
 
 
@@ -88,8 +97,10 @@ class ProviderRegistry:
         stored = (self._state.get("keys") or {}).get(provider_id)
         if stored:
             return stored, "stored"
-        if provider_id == OpenRouterProvider.id and self.settings.openrouter_api_key:
-            return self.settings.openrouter_api_key, "env"
+        key_attr, _ = ENV_SETTINGS.get(provider_id, ("", ""))
+        from_env = getattr(self.settings, key_attr, None) if key_attr else None
+        if from_env:
+            return from_env, "env"
         return None, "none"
 
     def set_key(self, provider_id: str, key: str) -> None:
@@ -112,10 +123,10 @@ class ProviderRegistry:
         if cls is None:
             raise ProviderError(f"unknown provider {provider_id!r}")
         key, source = self._key_for(provider_id)
-        if cls is OpenRouterProvider:
-            return OpenRouterProvider(
-                key, key_source=source, base_url=self.settings.openrouter_base_url
-            )
+        _, base_attr = ENV_SETTINGS.get(provider_id, ("", ""))
+        base_url = getattr(self.settings, base_attr, None) if base_attr else None
+        if base_url:
+            return cls(key, key_source=source, base_url=base_url)
         return cls(key, key_source=source)
 
     def list_providers(self) -> list[dict]:
