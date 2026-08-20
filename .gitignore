@@ -233,6 +233,9 @@ frontend/dist/
 # Built studio, produced by `npm run build` in frontend/
 app/static/
 
+# Runtime logs, written by scripts/start.sh
+logs/
+
 # Impeccable working directories
 .impeccable/review/
 frontend/uishot.mjs

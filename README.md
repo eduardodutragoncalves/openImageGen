@@ -78,10 +78,27 @@ python scripts/download_weights.py
 cd frontend && npm install && npm run build && cd ..
 
 # 5. serve
-./scripts/serve.sh
+./scripts/start.sh
 ```
 
-Then open <http://localhost:8000>. The API docs stay at `/docs`.
+`start.sh` brings the whole thing up with one command and takes it back down
+with one Ctrl-C: it stops whatever is already listening, starts the API, waits
+until it is actually answering rather than merely started, starts the studio,
+and opens it.
+
+```bash
+./scripts/start.sh              # dev: API + Vite with hot reload, two ports
+./scripts/start.sh --prod       # build the studio and serve it from the API
+./scripts/start.sh --stop       # stop both
+./scripts/start.sh --no-open --api-port 8100 --web-port 5200
+```
+
+Both processes report into one terminal, prefixed `[api]` and `[studio]`, and
+the same output goes to `logs/`. `./scripts/serve.sh` still starts the API on
+its own if that is all you want.
+
+Then open <http://localhost:8000> — or <http://localhost:5173> in dev. The API
+docs stay at `/docs`.
 
 The API comes up immediately and loads the models in the background:
 `GET /healthz` reports `loading` until everything is ready. Requests sent
@@ -511,12 +528,15 @@ A single-page app built with Vite and served by this same process from
 - **History is scoped per API key**, so on a shared server each person sees
   their own work. Give each person their own entry in `OIG_API_KEYS`.
 
-Development runs Vite against a live API:
+Development runs Vite against a live API. `./scripts/start.sh` does both at
+once, which is the point of it; by hand it is two terminals:
 
 ```bash
 OIG_DEV=true ./scripts/serve.sh    # allow the dev origin
 cd frontend && npm run dev         # http://localhost:5173, proxying /v1
 ```
+
+Vite aims its proxy at `OIG_PORT`, so moving the API moves both halves.
 
 The TypeScript client is generated from this service's own OpenAPI schema, so
 the two sides cannot drift:
@@ -633,6 +653,7 @@ frontend/            Vite + React + TypeScript studio
   tests/             Playwright critical path
 tests/               pytest suite (no GPU required)
 scripts/
+  start.sh              bring the API and the studio up together, and down
   download_weights.py   pre-download the HF cache
   dump_openapi.py       print the schema without starting a server
   serve.sh              start the API inside the conda env

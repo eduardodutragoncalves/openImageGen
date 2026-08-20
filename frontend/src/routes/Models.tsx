@@ -249,14 +249,14 @@ function ModelRow({
         {entry.capabilities.map((capability) => (
           <span
             key={capability}
-            className="flex h-5 items-center gap-1 border border-[var(--rule)] px-[5px] text-[9px] uppercase tracking-[0.1em] text-[var(--ink-muted)]"
+            className="flex h-5 items-center gap-1 border border-[var(--rule)] px-[5px] text-[10px] uppercase tracking-[0.1em] text-[var(--ink-muted)]"
           >
             {capability === "multi-reference" ? <IconLayers size={10} /> : null}
             {capability}
           </span>
         ))}
         {entry.gated ? (
-          <span className="flex h-5 items-center gap-1 border border-[var(--caution)] px-[5px] text-[9px] uppercase tracking-[0.1em] text-[var(--caution-ink)]">
+          <span className="flex h-5 items-center gap-1 border border-[var(--caution)] px-[5px] text-[10px] uppercase tracking-[0.1em] text-[var(--caution-ink)]">
             <IconKey size={10} />
             gated
           </span>
@@ -318,7 +318,7 @@ function ModelRow({
 function Spec({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-[2px]">
-      <dt className="label text-[9px]">{label}</dt>
+      <dt className="label">{label}</dt>
       <dd className="text-[var(--ink)]">{children}</dd>
     </div>
   );

@@ -65,13 +65,13 @@ export function RemoteModelList({
                   <span className="text-[12px] font-semibold text-[var(--ink)]">{model.name}</span>
                   <span className="font-mono text-[10px] text-[var(--ink-faint)]">{model.id}</span>
                   {model.pinned ? (
-                    <span className="flex h-4 items-center gap-1 border border-[var(--accent)] px-1 text-[9px] uppercase tracking-[0.1em] text-[var(--accent-ink)]">
-                      <IconCheck size={9} />
+                    <span className="flex h-4 items-center gap-1 border border-[var(--accent)] px-1 text-[10px] uppercase tracking-[0.1em] text-[var(--accent-ink)]">
+                      <IconCheck size={10} />
                       pinned
                     </span>
                   ) : null}
                   {model.is_router ? (
-                    <span className="flex h-4 items-center border border-[var(--rule-strong)] px-1 text-[9px] uppercase tracking-[0.1em] text-[var(--ink-faint)]">
+                    <span className="flex h-4 items-center border border-[var(--rule-strong)] px-1 text-[10px] uppercase tracking-[0.1em] text-[var(--ink-faint)]">
                       router
                     </span>
                   ) : null}

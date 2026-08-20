@@ -154,13 +154,13 @@ function KeyDot({
 }) {
   if (!provider?.configured) {
     return (
-      <span title="No key set" aria-label="no key set" className="text-[9px] tracking-normal opacity-70">
+      <span title="No key set" aria-label="no key set" className="text-[10px] tracking-normal opacity-70">
         no key
       </span>
     );
   }
   if (state.isLoading) {
-    return <span className="text-[9px] tracking-normal opacity-70">checking</span>;
+    return <span className="text-[10px] tracking-normal opacity-70">checking</span>;
   }
   const ok = state.data?.ok;
   return (
@@ -216,8 +216,8 @@ function LocalRow({ entry, onDone }: { entry: CatalogEntry; onDone: () => void }
             <span className="text-[11px] font-semibold text-[var(--ink)]">{entry.label}</span>
             <span className="font-mono text-[10px] text-[var(--ink-faint)]">{entry.repo_id}</span>
             {entry.loaded ? (
-              <span className="flex h-4 items-center gap-1 border border-[var(--accent)] px-1 text-[9px] uppercase tracking-[0.1em] text-[var(--accent-ink)]">
-                <IconCheck size={9} />
+              <span className="flex h-4 items-center gap-1 border border-[var(--accent)] px-1 text-[10px] uppercase tracking-[0.1em] text-[var(--accent-ink)]">
+                <IconCheck size={10} />
                 loaded
               </span>
             ) : null}
@@ -362,12 +362,12 @@ function HubRow({ model, onDone }: { model: HubModel; onDone: () => void }) {
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
             <span className="font-mono text-[11px] text-[var(--ink)]">{model.repo_id}</span>
             {model.cached ? (
-              <span className="flex h-4 items-center border border-[var(--rule-strong)] px-1 text-[9px] uppercase tracking-[0.1em] text-[var(--ink-faint)]">
+              <span className="flex h-4 items-center border border-[var(--rule-strong)] px-1 text-[10px] uppercase tracking-[0.1em] text-[var(--ink-faint)]">
                 on disk
               </span>
             ) : null}
             {model.in_catalog ? (
-              <span className="flex h-4 items-center border border-[var(--accent)] px-1 text-[9px] uppercase tracking-[0.1em] text-[var(--accent-ink)]">
+              <span className="flex h-4 items-center border border-[var(--accent)] px-1 text-[10px] uppercase tracking-[0.1em] text-[var(--accent-ink)]">
                 profiled
               </span>
             ) : null}

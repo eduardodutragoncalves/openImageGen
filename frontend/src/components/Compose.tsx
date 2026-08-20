@@ -697,7 +697,7 @@ function ReferenceField({
               aria-label="Add a reference image"
             >
               <IconUpload size={14} />
-              <span className="text-[9px] uppercase tracking-[0.1em]">add</span>
+              <span className="text-[10px] uppercase tracking-[0.1em]">add</span>
             </button>
           ) : null}
           {files.length === 0 ? (
