@@ -22,7 +22,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     upsample_mode   TEXT,
     reference_count INTEGER NOT NULL DEFAULT 0,
     images          TEXT NOT NULL DEFAULT '[]',
+    references_json TEXT NOT NULL DEFAULT '[]',
     error           TEXT,
     duration_s      REAL
 );
@@ -77,6 +78,8 @@ class JobRecord:
     upsample_mode: str | None = None
     reference_count: int = 0
     images: list[dict] = field(default_factory=list)
+    # The reference images the job was given, saved so an edit can be retried.
+    references_json: list[dict] = field(default_factory=list)
     error: str | None = None
     duration_s: float | None = None
 
@@ -91,14 +94,29 @@ class JobStore:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(_SCHEMA)
+            self._migrate()
             self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._db.commit()
         logger.info("job history at %s", db_path)
+
+    def _migrate(self) -> None:
+        """Add columns a database written by an older version is missing.
+
+        CREATE TABLE IF NOT EXISTS leaves an existing table untouched, so a
+        new column has to be added explicitly or every query naming it fails
+        against an archive that already has jobs in it.
+        """
+        existing = {row["name"] for row in self._db.execute("PRAGMA table_info(jobs)")}
+        for column, ddl in (("references_json", "TEXT NOT NULL DEFAULT '[]'"),):
+            if column not in existing:
+                logger.info("migrating job archive: adding %s", column)
+                self._db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
 
     # ----------------------------------------------------------------- write
     def upsert(self, record: JobRecord) -> None:
         data = asdict(record)
         data["images"] = json.dumps(record.images)
+        data["references_json"] = json.dumps(record.references_json)
         columns = ", ".join(data)
         placeholders = ", ".join(f":{key}" for key in data)
         updates = ", ".join(f"{key}=excluded.{key}" for key in data if key != "id")
@@ -231,6 +249,7 @@ class JobStore:
 def _to_record(row: sqlite3.Row) -> JobRecord:
     data = dict(row)
     data["images"] = json.loads(data.get("images") or "[]")
+    data["references_json"] = json.loads(data.get("references_json") or "[]")
     return JobRecord(**data)
 
 

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from .config import Settings
 from .devices import available_gpus, plan_placement
 from .engines import BaseEngine, create_engine
-from .engines.base import choose_precision
+from .engines.base import choose_precision, free_vram_gb, release_cuda_memory
 from .jobs import JobQueue
 from .models_registry import CATALOG, ModelSpec, by_id, spec_for_repo
 
@@ -153,33 +153,50 @@ class ModelManager:
         if switching:
             self._ready.clear()
 
+        failure: str | None = None
         try:
-            if switching:
-                self._drain()
-                self._set_phase("unloading " + (previous.label if previous else "model"), 0.05)
-                self._teardown()
+            try:
+                if switching:
+                    self._drain()
+                    self._set_phase(
+                        "unloading " + (previous.label if previous else "model"), 0.05
+                    )
+                    self._teardown()
+                    self._require_headroom(spec)
 
-            self._activate(spec)
-            self.status.state = "ready"
-            self.status.model_id = spec.id
-            self.status.target_id = None
-            self.status.phase = "ready"
-            self.status.progress = 1.0
-            self.status.finished = int(time.time())
-            self._ready.set()
-            logger.info("model ready: %s", spec.label)
-
-        except Exception as exc:  # noqa: BLE001 - reported through the API
-            detail = f"{type(exc).__name__}: {exc}"
-            logger.exception("loading %s failed", spec.label)
-            if previous is not None and self._restore(previous, detail):
+                self._activate(spec)
+                # Cleared before the ready status is published: a client that
+                # polls until "ready" must be able to switch again immediately,
+                # and the finally below makes this idempotent.
+                self._busy.clear()
+                self.status.state = "ready"
+                self.status.model_id = spec.id
+                self.status.target_id = None
+                self.status.phase = "ready"
+                self.status.progress = 1.0
+                self.status.finished = int(time.time())
+                self._ready.set()
+                logger.info("model ready: %s", spec.label)
                 return
+            except Exception as exc:  # noqa: BLE001 - reported through the API
+                failure = f"{type(exc).__name__}: {exc}"
+                logger.exception("loading %s failed", spec.label)
+
+            # Outside the handler on purpose: while an exception is being
+            # handled its traceback holds every frame of the failed load, and
+            # those frames hold the tensors that just filled the card. The
+            # restore below needs that memory back before it can succeed.
+            release_cuda_memory()
+
+            if previous is not None and self._restore(previous, failure):
+                return
+
             self._engine = None
             self.status.state = "error"
             self.status.model_id = None
             self.status.target_id = None
             self.status.phase = "failed"
-            self.status.detail = detail
+            self.status.detail = self._failure_detail(failure)
             self.status.finished = int(time.time())
             # Unblock anything waiting: it needs the error, not a deadlock.
             self._ready.set()
@@ -187,6 +204,49 @@ class ModelManager:
             self._busy.clear()
             if self._queue is not None:
                 self._queue.resume()
+
+    def _failure_detail(self, failure: str) -> str:
+        # The restore attempt just ended; collect before measuring, or the
+        # number reported is the one from inside the failure.
+        release_cuda_memory()
+        free = free_vram_gb()
+        if not free:
+            return failure
+        return (
+            f"{failure} — no model is loaded and the GPUs have "
+            + " / ".join(f"{value:.1f}GB" for value in free)
+            + " free. If that is far below the card's capacity, the driver is "
+            "still holding memory this process cannot reclaim and the service "
+            "has to be restarted."
+        )
+
+    def _require_headroom(self, spec: ModelSpec) -> None:
+        """Refuse a load that cannot fit, instead of discovering it at 90%.
+
+        An OOM part-way through leaves a half-built pipeline on the card, so
+        the cheapest failure is the one that happens before any weights move.
+        """
+        free = free_vram_gb()
+        if not free:
+            return
+        precision = choose_precision(spec)
+        transformer_gb, encoder_gb = spec.footprints(precision)
+        largest = max(free)
+        if largest < transformer_gb + 1.5:
+            raise RuntimeError(
+                f"{spec.label} needs ~{transformer_gb:.0f}GB for the transformer and the "
+                f"freest GPU has {largest:.1f}GB available. The previous model was "
+                "unloaded but the driver has not returned all of its memory; a restart "
+                "will clear it."
+            )
+        if len(free) >= 2:
+            second = sorted(free, reverse=True)[1]
+            if second < encoder_gb + 1.0 and sum(free) < transformer_gb + encoder_gb + 2.5:
+                raise RuntimeError(
+                    f"{spec.label} needs ~{transformer_gb + encoder_gb:.0f}GB in total and only "
+                    + " / ".join(f"{value:.1f}GB" for value in free)
+                    + " is free. A restart will clear whatever the last model left behind."
+                )
 
     def _restore(self, previous: ModelSpec, failure: str) -> bool:
         """Put the old model back so a bad swap does not cost the service."""
@@ -214,7 +274,13 @@ class ModelManager:
     def _activate(self, spec: ModelSpec) -> None:
         engine = create_engine(self.settings, spec)
         engine.on_phase = self._set_phase
-        engine.load()
+        try:
+            engine.load()
+        except BaseException:
+            # Whatever reached the GPU before the failure is still there;
+            # unload it here, while this engine is still addressable.
+            engine.unload()
+            raise
         with self._lock:
             self._engine = engine
 

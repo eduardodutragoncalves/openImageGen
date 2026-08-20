@@ -31,6 +31,35 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[float], None]
 
 
+def free_vram_gb() -> list[float]:
+    """Free memory per visible CUDA device, in GB."""
+    if not torch.cuda.is_available():
+        return []
+    out = []
+    for index in range(torch.cuda.device_count()):
+        free, _total = torch.cuda.mem_get_info(index)
+        out.append(free / 1024**3)
+    return out
+
+
+def release_cuda_memory() -> None:
+    """Return everything the allocator is holding, on every device.
+
+    empty_cache() alone releases the caching allocator's free blocks for the
+    current device only, so a two-card placement needs the loop; the double
+    collection catches reference cycles between a pipeline and its components.
+    """
+    gc.collect()
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    for index in range(torch.cuda.device_count()):
+        with torch.cuda.device(index):
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+
 def choose_precision(spec: ModelSpec) -> str:
     """bf16 when the card can hold it, NF4 when it cannot.
 
@@ -133,15 +162,42 @@ class BaseEngine(ABC):
         logger.info("%s ready in %.1fs", self.spec.label, time.perf_counter() - t0)
 
     def unload(self) -> None:
-        self.pipe = None
+        """Give the VRAM back, and say how much came back.
+
+        Dropping `self.pipe` is not enough on its own: the pipeline holds its
+        components, the filters and the upsampler hold some of the same
+        modules, and a reference surviving in any one of them keeps tens of
+        gigabytes resident. A swap that leaks even a few GB per cycle runs the
+        card out on the third switch, which is exactly how this was found.
+        """
+        before = free_vram_gb()
+
+        pipe, self.pipe = self.pipe, None
+        if pipe is not None:
+            for name in list(getattr(pipe, "components", {}) or {}):
+                try:
+                    object.__setattr__(pipe, name, None)
+                except Exception:  # noqa: BLE001 - best effort per component
+                    pass
+        del pipe
+
         self._nsfw = None
         self._integrity = None
         self._local_upsampler = None
         self._openrouter = None
         self._loaded = False
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+
+        release_cuda_memory()
+
+        after = free_vram_gb()
+        if before and after:
+            freed = [f"{b - a:+.1f}" for a, b in zip(before, after)]
+            logger.info(
+                "unloaded %s: freed %s GB, now free %s GB",
+                self.spec.label,
+                " / ".join(freed),
+                " / ".join(f"{value:.1f}" for value in after),
+            )
 
     def _phase(self, label: str, progress: float) -> None:
         logger.info("%s: %s", self.spec.label, label)

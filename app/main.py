@@ -41,6 +41,7 @@ from .schemas import (
     ImagePayload,
     JobImage,
     JobPage,
+    JobRequest,
     JobState,
     JobStatusResponse,
     JobSubmitted,
@@ -135,6 +136,26 @@ def _handle_job(job: Job) -> GenerationResponse:
     # archive should record what actually produced the image.
     job.model_id = engine.spec.id
     job.model_label = engine.spec.label
+
+    references = payload.get("references") or []
+    if references and not payload.get("reference_urls"):
+        # Saved before generation, not after: a job that fails or is refused is
+        # exactly the one whose references the operator will want back.
+        settings_now = get_settings()
+        settings_now.output_dir.mkdir(parents=True, exist_ok=True)
+        saved = []
+        for index, reference in enumerate(references):
+            name = f"{job.id}_ref{index}.png"
+            reference.save(settings_now.output_dir / name)
+            saved.append(
+                {
+                    "url": f"/v1/files/{name}",
+                    "seed": 0,
+                    "width": reference.width,
+                    "height": reference.height,
+                }
+            )
+        payload["reference_urls"] = saved
 
     started = time.perf_counter()
     result: EngineResult = engine.generate(
@@ -241,28 +262,68 @@ def _record_for(job: Job) -> JobRecord:
         upsample_mode=payload.get("upsample_mode"),
         reference_count=len(payload.get("references") or []),
         images=images,
+        references_json=payload.get("reference_urls") or [],
         error=job.error,
         duration_s=duration,
     )
 
 
-def _summary(record: JobRecord, *, live: Job | None = None) -> JobSummary:
+def _available(entries: list[dict]) -> list[JobImage]:
     settings = get_settings()
-    images = []
-    for entry in record.images:
+    out = []
+    for entry in entries:
         url = entry.get("url")
-        available = True
-        if url:
-            available = (settings.output_dir / Path(url).name).is_file()
-        images.append(
+        out.append(
             JobImage(
                 url=url,
                 seed=int(entry.get("seed", 0)),
                 width=int(entry.get("width", 0)),
                 height=int(entry.get("height", 0)),
-                available=available,
+                available=bool(url) and (settings.output_dir / Path(url).name).is_file(),
             )
         )
+    return out
+
+
+def _request_from_payload(job: Job) -> JobRequest:
+    payload = job.payload if isinstance(job.payload, dict) else {}
+    return JobRequest(
+        prompt=str(payload.get("prompt", "")),
+        kind=job.kind,
+        width=payload.get("width"),
+        height=payload.get("height"),
+        num_steps=payload.get("num_steps"),
+        guidance=payload.get("guidance"),
+        seed=payload.get("seed"),
+        num_images=int(payload.get("num_images", 1) or 1),
+        upsample_mode=payload.get("upsample_mode"),
+        model_id=job.model_id,
+        model_label=job.model_label,
+        reference_count=len(payload.get("references") or []),
+        references=_available(payload.get("reference_urls") or []),
+    )
+
+
+def _request_from_record(record: JobRecord) -> JobRequest:
+    return JobRequest(
+        prompt=record.prompt,
+        kind=record.kind,
+        width=record.width,
+        height=record.height,
+        num_steps=record.num_steps,
+        guidance=record.guidance,
+        seed=record.seed,
+        num_images=record.num_images,
+        upsample_mode=record.upsample_mode,
+        model_id=record.model_id,
+        model_label=record.model_label,
+        reference_count=record.reference_count,
+        references=_available(record.references_json),
+    )
+
+
+def _summary(record: JobRecord, *, live: Job | None = None) -> JobSummary:
+    images = _available(record.images)
 
     progress = live.progress if live is not None else None
     queue_position = None
@@ -443,6 +504,7 @@ def _job_response(job: Job) -> JobStatusResponse:
         finished=job.finished,
         queue_position=state.queue.position(job),
         progress=job.progress,
+        request=_request_from_payload(job),
         result=job.result,
         error=job.error,
     )
@@ -794,6 +856,7 @@ def get_job(
         finished=record.finished,
         queue_position=None,
         progress=1.0 if record.status == "succeeded" else None,
+        request=_request_from_record(record),
         result=GenerationResponse(
             id=record.id,
             model=record.model_id or "",
@@ -830,7 +893,7 @@ def delete_job(job_id: str, owner: str = Depends(require_owner)) -> Response:
     if record.status in ("queued", "running"):
         raise HTTPException(status_code=409, detail=f"job is {record.status}")
 
-    for entry in record.images:
+    for entry in [*record.images, *record.references_json]:
         url = entry.get("url")
         if not url:
             continue

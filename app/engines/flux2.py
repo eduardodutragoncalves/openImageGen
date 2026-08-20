@@ -1,12 +1,18 @@
 """FLUX.2 backend.
 
-One Mistral3 vision-language model does the text encoding, which is also what
-makes local prompt upsampling and the integrity filter free in VRAM terms:
-they reuse an encoder that is already resident.
+The family is not one architecture. [dev] pairs a Mistral3 vision-language
+encoder with `Flux2Pipeline`; [klein] pairs a Qwen3 causal LM with
+`Flux2KleinPipeline`. Rather than guess, this module reads the checkpoint's own
+`model_index.json`, which names the pipeline and every component class — the
+same file diffusers itself dispatches on. Hardcoding one variant made the other
+instantiate a model its weights never described, which surfaced as an
+out-of-memory error on load rather than as the type error it really was.
 """
 
 from __future__ import annotations
 
+import inspect
+import json
 import logging
 
 import torch
@@ -17,20 +23,78 @@ from .base import BaseEngine
 
 logger = logging.getLogger(__name__)
 
+# Only a generative vision-language encoder can run the integrity filter or
+# rewrite a prompt from a reference image.
+_VISION_LANGUAGE_ARCHITECTURES = {"Mistral3ForConditionalGeneration"}
+
+
+def _read_model_index(repo: str) -> dict:
+    """The checkpoint's own description of itself, or {} when it has none."""
+    try:
+        from huggingface_hub import hf_hub_download
+
+        with open(hf_hub_download(repo, "model_index.json")) as handle:
+            return json.load(handle)
+    except Exception as exc:  # noqa: BLE001 - a mirror may omit the file
+        logger.info("no model_index.json for %s (%s); falling back to configs", repo, exc)
+        return {}
+
+
+def _class_from(module, name: str, default):
+    resolved = getattr(module, name, None) if name else None
+    if resolved is None and name:
+        logger.warning("%s is not exported by %s; using %s", name, module.__name__, default.__name__)
+    return resolved or default
+
+
+def _component_name(index: dict, key: str) -> str:
+    entry = index.get(key)
+    return entry[1] if isinstance(entry, list) and len(entry) > 1 else ""
+
+
+def _encoder_architecture_from_config(repo: str) -> str:
+    from transformers import AutoConfig
+
+    try:
+        config = AutoConfig.from_pretrained(repo, subfolder="text_encoder")
+    except Exception:  # noqa: BLE001
+        return ""
+    architectures = getattr(config, "architectures", None) or []
+    return architectures[0] if architectures else ""
+
 
 class Flux2Engine(BaseEngine):
-    """FLUX.2 [dev] / [klein]: Flux2Pipeline + Mistral3 text encoder."""
+    """FLUX.2 [dev] and [klein], each loaded as its checkpoint describes."""
 
     def _load_pipeline(self) -> None:
+        import diffusers
+        import transformers
         from diffusers import (
             AutoencoderKLFlux2,
             FlowMatchEulerDiscreteScheduler,
             Flux2Pipeline,
             Flux2Transformer2DModel,
         )
-        from transformers import AutoProcessor, Mistral3ForConditionalGeneration
 
         repo = self.spec.repo_id
+        index = _read_model_index(repo)
+
+        pipeline_cls = _class_from(diffusers, index.get("_class_name", ""), Flux2Pipeline)
+        encoder_arch = _component_name(index, "text_encoder") or _encoder_architecture_from_config(repo)
+        encoder_cls = _class_from(
+            transformers, encoder_arch, transformers.AutoModelForCausalLM
+        )
+        tokenizer_cls = _class_from(
+            transformers, _component_name(index, "tokenizer"), transformers.AutoProcessor
+        )
+        logger.info(
+            "%s: %s with %s / %s",
+            self.spec.label,
+            pipeline_cls.__name__,
+            encoder_arch or "?",
+            tokenizer_cls.__name__,
+        )
+
         plan = self.plan
         dit_device = plan.transformer_device
         te_device = plan.text_encoder_device
@@ -58,7 +122,7 @@ class Flux2Engine(BaseEngine):
             vae = vae.to(dit_device)
 
         self._phase("loading text encoder", 0.60)
-        text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
+        text_encoder = encoder_cls.from_pretrained(
             repo,
             subfolder="text_encoder",
             torch_dtype=torch.bfloat16,
@@ -66,7 +130,7 @@ class Flux2Engine(BaseEngine):
         )
 
         self._phase("loading tokenizer and scheduler", 0.90)
-        processor = AutoProcessor.from_pretrained(repo, subfolder="tokenizer")
+        tokenizer = tokenizer_cls.from_pretrained(repo, subfolder="tokenizer")
         scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(repo, subfolder="scheduler")
 
         # The stock pipeline derives its working device from the first module it
@@ -75,18 +139,23 @@ class Flux2Engine(BaseEngine):
         # that is where latents, the VAE and the denoising loop must run.
         compute_device = torch.device(dit_device)
 
-        class _PinnedDeviceFlux2Pipeline(Flux2Pipeline):
+        class _PinnedDevicePipeline(pipeline_cls):  # type: ignore[misc,valid-type]
             @property
             def _execution_device(self) -> torch.device:
                 return compute_device
 
-        self.pipe = _PinnedDeviceFlux2Pipeline(
-            scheduler=scheduler,
-            vae=vae,
-            text_encoder=text_encoder,
-            tokenizer=processor,
-            transformer=transformer,
-        )
+        kwargs = {
+            "scheduler": scheduler,
+            "vae": vae,
+            "text_encoder": text_encoder,
+            "tokenizer": tokenizer,
+            "transformer": transformer,
+        }
+        # klein is distilled in steps and guidance and says so in its index.
+        if "is_distilled" in inspect.signature(pipeline_cls.__init__).parameters:
+            kwargs["is_distilled"] = bool(index.get("is_distilled", False))
+
+        self.pipe = _PinnedDevicePipeline(**kwargs)
         self.pipe.set_progress_bar_config(disable=True)
 
         if plan.cpu_offload:
@@ -96,10 +165,20 @@ class Flux2Engine(BaseEngine):
         self._phase("loading safety filters", 0.95)
         self._load_nsfw_filter(te_device)
 
-        if self.settings.enable_integrity_filter:
-            self._integrity = IntegrityFilter(text_encoder, processor)
-
-        self._local_upsampler = LocalUpsampler(self.pipe, te_device)
+        # Both of these drive the text encoder as a generative vision-language
+        # model. A text-only causal LM cannot do it, and pretending otherwise
+        # fails at request time instead of at load time.
+        vision_language = encoder_arch in _VISION_LANGUAGE_ARCHITECTURES
+        if self.settings.enable_integrity_filter and vision_language:
+            self._integrity = IntegrityFilter(text_encoder, tokenizer)
+        elif self.settings.enable_integrity_filter:
+            logger.warning(
+                "integrity filter unavailable on %s: %s is not a vision-language model",
+                self.spec.label,
+                encoder_arch,
+            )
+        if vision_language:
+            self._local_upsampler = LocalUpsampler(self.pipe, te_device)
 
     def _encode(self, prompt: str) -> dict:
         te_device = torch.device(self.plan.text_encoder_device)

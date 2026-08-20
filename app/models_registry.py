@@ -143,11 +143,13 @@ _FLUX2: list[ModelSpec] = [
         label="FLUX.2 [klein] 4B",
         summary=(
             "The small, fast, Apache-2.0 member of the family — the one to run "
-            "when the output has to be usable commercially."
+            "when the output has to be usable commercially. Its text encoder is "
+            "a Qwen3 causal LM, so local prompt upsampling is unavailable."
         ),
         licence=APACHE_2,
-        transformer_vram_gb=9.0,
-        text_encoder_vram_gb=9.0,
+        # Measured from the checkpoint: 7.3GB transformer, 7.5GB Qwen3 encoder.
+        transformer_vram_gb=8.0,
+        text_encoder_vram_gb=8.5,
         capabilities=("text-to-image", "image-edit", "multi-reference"),
         default_steps=28,
         default_guidance=4.0,
@@ -162,7 +164,7 @@ _FLUX2: list[ModelSpec] = [
         summary="The larger klein: more capable than 4B, still Apache-2.0.",
         licence=APACHE_2,
         transformer_vram_gb=19.0,
-        text_encoder_vram_gb=17.0,
+        text_encoder_vram_gb=9.0,
         capabilities=("text-to-image", "image-edit", "multi-reference"),
         default_steps=28,
         default_guidance=4.0,

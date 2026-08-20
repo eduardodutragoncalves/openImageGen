@@ -160,6 +160,30 @@ class JobPage(BaseModel):
     offset: int
 
 
+class JobRequest(BaseModel):
+    """What was asked for, independent of what came back.
+
+    A refused or failed job has no result, and that is exactly when the
+    operator most needs the settings back to adjust and try again.
+    """
+
+    prompt: str
+    kind: str = "generation"
+    width: int | None = None
+    height: int | None = None
+    num_steps: int | None = None
+    guidance: float | None = None
+    seed: int | None = None
+    num_images: int = 1
+    upsample_mode: str | None = None
+    model_id: str | None = None
+    model_label: str | None = None
+    reference_count: int = 0
+    # The reference images this job was given, kept so an edit can be retried
+    # without hunting for the originals again.
+    references: list[JobImage] = Field(default_factory=list)
+
+
 class JobStatusResponse(BaseModel):
     id: str
     status: JobState
@@ -168,6 +192,7 @@ class JobStatusResponse(BaseModel):
     finished: int | None = None
     queue_position: int | None = None
     progress: float | None = Field(default=None, ge=0.0, le=1.0)
+    request: JobRequest | None = None
     result: GenerationResponse | None = None
     error: str | None = None
 
