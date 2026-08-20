@@ -732,3 +732,68 @@ class TestCheckCaching:
         registry.clear_key("runware")
         registry.check_key("runware")
         assert calls["n"] == 2
+
+
+class TestCreatorShapes:
+    """Who made a model is answered in three different shapes across the two
+    surfaces, and stringifying the wrong one puts a Python dict on screen."""
+
+    def test_the_curated_slug_is_taken_as_written(self, monkeypatch):
+        provider, _ = _curated(monkeypatch)
+        assert provider.get_model("bfl:flux@2-dev").creator == "black-forest-labs"
+
+    def test_a_whole_creator_record_is_reduced_to_its_name(self, monkeypatch):
+        entry = dict(
+            CURATED[0],
+            creator={
+                "id": "xai",
+                "name": "xAI",
+                "logo": "https://assets.runware.ai/x.png",
+                "description": "a paragraph that does not belong on a list row",
+            },
+        )
+        provider, _ = _curated(monkeypatch, [entry])
+        model = provider.search_catalog(kind="all").models[0]
+        assert model.creator == "xAI"
+        assert "{" not in model.creator
+
+    def test_no_creator_at_all_is_empty_rather_than_none(self, monkeypatch):
+        provider, _ = _paid(monkeypatch, _search_payload(COMMUNITY_RESULTS[1:]))
+        model = provider.search_catalog(kind="community").models[0]
+        assert model.creator == ""
+
+
+class TestTheRealPayloadShape:
+    """Shaped from a live `modelSearch` answer, so the fixtures above cannot
+    drift away from what Runware actually sends."""
+
+    LIVE = {
+        "name": "Absolute Realistic Vision - SD1.5 Merge",
+        "air": "civitai:106886@114852",
+        "tags": ["photorealistic", "base model", "photo", "realistic"],
+        "heroImage": "https://mim.runware.ai/r/67c4a14056145-800x1067.jpg",
+        "category": "checkpoint",
+        "private": False,
+        "comment": "",
+        "version": "v1.0",
+        "architecture": "sd1x",
+        "capabilities": ["form:checkpoint", "io:text-to-image", "io:image-to-image"],
+        "source": "community",
+        "defaultWidth": 512,
+        "defaultHeight": 512,
+        "defaultSteps": 20,
+        "defaultCFG": 7.5,
+    }
+
+    def test_it_is_read_as_a_generator_that_takes_a_reference(self, monkeypatch):
+        provider, _ = _paid(monkeypatch, _search_payload([self.LIVE]))
+        model = provider.search_catalog(kind="community").models[0]
+
+        assert model.id == "civitai:106886@114852"
+        assert model.makes_images is True
+        assert model.reads_images is True
+        # The architecture is the first thing an operator looks for, and the
+        # community mirror's hero image is a cover like any other.
+        assert model.description.startswith("sd1x · photorealistic")
+        assert model.cover_image.startswith("https://mim.runware.ai/")
+        assert model.creator == ""

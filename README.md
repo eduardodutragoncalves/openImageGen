@@ -530,7 +530,7 @@ cd frontend && npm run schema
 ## Tests
 
 ```bash
-pytest tests/                      # 109 checks, no GPU: runs under OIG_DRY_RUN
+pytest tests/                      # 113 checks, no GPU: runs under OIG_DRY_RUN
 cd frontend && npm run test:e2e    # the critical path in a real browser
 ```
 

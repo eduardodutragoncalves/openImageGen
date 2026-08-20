@@ -102,6 +102,19 @@ def _to_data_uri(image: Image.Image, max_side: int = 1536) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def _creator(entry: dict) -> str:
+    """Who made it, from whichever shape this surface uses.
+
+    The curated document names the creator with a slug; `modelSearch` answers
+    its featured entries with the whole creator record — id, name, logo, a
+    paragraph of description — and its community ones with nothing at all.
+    """
+    value = entry.get("creator") or entry.get("provider") or ""
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("id") or ""
+    return str(value)
+
+
 def _fit(value: int | None, fallback: int) -> int:
     """Runware takes sizes in steps of 64 within 128..2048.
 
@@ -190,8 +203,9 @@ class RunwareProvider(Provider):
         if code == "insufficientCredits" or status == 402:
             return "Runware reports no credit left on this account."
         if error.get("parameter") == "search":
-            # The docs mark `search` as required. If a blank one is refused,
-            # say what to do about it rather than repeating the field name.
+            # The docs mark `search` as required and the API accepts a blank
+            # one anyway. Kept for the day that changes, and phrased as what to
+            # do rather than as the name of a field.
             return "Runware needs something to search for. Type a model name or an AIR id."
         return f"Runware refused the request: {message or code or status}"
 
@@ -368,7 +382,7 @@ class RunwareProvider(Provider):
             # per-unit number, so it is carried as one.
             price_note=(str(entry.get("pricingOverview") or "").strip() or None),
             cover_image=(str(entry.get("coverImage") or entry.get("heroImage") or "") or None),
-            creator=str(entry.get("creator") or entry.get("provider") or ""),
+            creator=_creator(entry),
         )
 
     # ------------------------------------------------------------- generation
