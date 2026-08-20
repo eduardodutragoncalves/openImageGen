@@ -969,6 +969,15 @@ export interface components {
             price_image?: string | null;
             /** Price Prompt */
             price_prompt?: string | null;
+            /** Price Note */
+            price_note?: string | null;
+            /** Cover Image */
+            cover_image?: string | null;
+            /**
+             * Creator
+             * @default
+             */
+            creator: string;
             /** Is Router */
             is_router: boolean;
             /** Makes Images */
@@ -1356,7 +1365,7 @@ export interface operations {
             query?: {
                 /** @description Substring of the id, name or description */
                 q?: string;
-                /** @description 'image' keeps only models that output images */
+                /** @description 'image' keeps only models that output images, 'text' only text models, 'all' drops the filter. 'community' reaches past a provider's curated catalog into everything it mirrors, where it has one. Which of these a provider can honour is reported as `kinds` on /v1/providers. */
                 kind?: string;
                 limit?: number;
                 include_routers?: boolean;

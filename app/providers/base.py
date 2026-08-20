@@ -38,6 +38,14 @@ class RemoteModel:
     # unit between providers. Displayed, never used in arithmetic.
     price_image: str | None = None
     price_prompt: str | None = None
+    # Some catalogs quote a price as prose rather than a per-unit number
+    # ("$0.03 per image output, plus $0.003 per input image"). Shown as
+    # written, because rewriting someone's pricing is how you misquote it.
+    price_note: str | None = None
+    # A picture of what the model makes, where the provider publishes one. The
+    # difference between a list of identifiers and a catalog you can read.
+    cover_image: str | None = None
+    creator: str = ""
     # A router entry rather than a model: useful, but not a checkpoint.
     is_router: bool = False
 
@@ -59,6 +67,9 @@ class RemoteModel:
             "context_length": self.context_length,
             "price_image": self.price_image,
             "price_prompt": self.price_prompt,
+            "price_note": self.price_note,
+            "cover_image": self.cover_image,
+            "creator": self.creator,
             "is_router": self.is_router,
             "makes_images": self.makes_images,
             "reads_images": self.reads_images,

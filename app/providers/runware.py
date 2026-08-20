@@ -1,13 +1,17 @@
 """Runware: a GPU marketplace behind one task-shaped API.
 
-It differs from OpenRouter in the two ways that matter to this module.
+It offers its catalog twice over, and this module uses both.
 
-Its catalog is enormous — it mirrors civitai on top of its own featured
-models — so it cannot be fetched and filtered here; every query goes to
-`modelSearch` and comes back paginated. And nothing is readable without a
-credential, so the tab has to say "add a key" rather than showing a list.
+`content.runware.ai` publishes the curated set — a few hundred models with a
+cover image, a headline and a declared capability list, served to anyone
+without a credential. That is what the operator browses, and it is the same
+catalog Runware's own model picker is built on.
 
-What it gives back is a real diffusion host rather than a chat model that
+`modelSearch`, on the paid API, reaches everything else: the civitai mirror,
+hundreds of thousands of community checkpoints. It needs a key, so it is what a
+typed query falls through to once one exists.
+
+What it generates with is a real diffusion host rather than a chat model that
 happens to emit an image: `imageInference` takes a prompt, a size and a
 checkpoint, and returns the picture.
 """
@@ -18,6 +22,8 @@ import base64
 import io
 import logging
 import re
+import threading
+import time
 import uuid
 
 import httpx
@@ -36,21 +42,15 @@ logger = logging.getLogger(__name__)
 _NAMESPACE = re.compile(r"^[a-z]+:")
 _SQUASH = re.compile(r"[^a-z0-9]")
 
-# Capabilities that mean "give it a prompt and it produces a picture".
-# Deliberately excludes the utility heads — upscale, background removal,
-# vectorise — which return an image but ignore what you asked for, and the
-# video and 3D heads, which return something this application cannot show.
-MAKES_IMAGES = frozenset(
-    {
-        "texttoimage",
-        "imagetoimage",
-        "edit",
-        "inpaint",
-        "inpainting",
-        "extend",
-        "outpaint",
-        "outpainting",
-    }
+# The `io:` capabilities say what comes out. Only these two end in a picture;
+# `io:text-to-video` and `io:image-to-3d` end in something this application
+# cannot show.
+OUTPUTS_IMAGE = frozenset({"texttoimage", "imagetoimage"})
+# What a model does to an image it is given. `io:image-to-image` is not on this
+# list on purpose: a background remover and an upscaler both declare it, and
+# neither one draws what you asked for. Only an editing op does.
+EDITS_IMAGES = frozenset(
+    {"edit", "inpaint", "inpainting", "extend", "outpaint", "outpainting"}
 )
 # Capabilities that mean the model takes an image in.
 READS_IMAGES = frozenset(
@@ -75,6 +75,14 @@ READS_IMAGES = frozenset(
 # Everything else in the catalog is an ingredient rather than a model you can
 # generate with: LoRAs, VAEs, embeddings.
 GENERATOR_CATEGORY = "checkpoint"
+
+# The curated catalog is one 400KB document that changes when Runware ships a
+# model, so it is fetched once and held. A provider instance is built per
+# request, so the cache has to outlive it.
+CURATED_URL = "https://content.runware.ai/models"
+_CURATED_TTL_S = 900.0
+_curated_lock = threading.Lock()
+_curated_cache: tuple[float, list["RemoteModel"]] = (0.0, [])
 
 
 def _squash(values) -> set[str]:
@@ -110,16 +118,19 @@ class RunwareProvider(Provider):
     id = "runware"
     label = "Runware"
     summary = (
-        "A GPU marketplace: FLUX, SDXL, Qwen and Seedream alongside a mirror of "
-        "civitai. The catalog needs a key to read, and is searched rather than "
-        "listed — there are far too many models to show at once."
+        "A GPU marketplace: FLUX, SDXL, Qwen and Seedream, plus a mirror of "
+        "civitai. The curated catalog browses without a key; searching the "
+        "whole of it, and generating, needs one."
     )
     docs_url = "https://runware.ai/docs"
     key_url = "https://my.runware.ai/keys"
-    catalog_is_public = False
-    # Runware hosts image checkpoints. There is no text catalog to offer, and a
-    # filter that returned nothing would only look broken.
-    kinds = ("image", "all")
+    # The curated catalog is served publicly, so there is something to look at
+    # before anyone pastes a credential.
+    catalog_is_public = True
+    # Runware hosts image checkpoints, so there is no text catalog to offer.
+    # "community" is the third step: the civitai mirror behind the paid API,
+    # which only a typed query can reach.
+    kinds = ("image", "all", "community")
 
     def __init__(
         self,
@@ -137,8 +148,9 @@ class RunwareProvider(Provider):
         """Post one task and return the `data` entries it produced."""
         if not self.api_key:
             raise ProviderError(
-                "Runware needs an API key — its catalog is not public. Add one on the "
-                "Web models tab or set OIG_RUNWARE_API_KEY."
+                "Runware needs an API key for this. Browsing the curated catalog is "
+                "free; searching the community mirror and generating are not. Add a "
+                "key on the Web models tab or set OIG_RUNWARE_API_KEY."
             )
         body = [{"taskUUID": str(uuid.uuid4()), **task}]
         try:
@@ -184,6 +196,43 @@ class RunwareProvider(Provider):
         return f"Runware refused the request: {message or code or status}"
 
     # ---------------------------------------------------------------- catalog
+    def list_models(self) -> list[RemoteModel]:
+        """The curated catalog, which is public.
+
+        One document of a few hundred models, held for a while rather than
+        re-fetched per keystroke. Filtering and searching it is the base
+        class's job.
+        """
+        global _curated_cache
+        fetched_at, cached = _curated_cache
+        if cached and time.monotonic() - fetched_at < _CURATED_TTL_S:
+            return cached
+
+        try:
+            response = httpx.get(CURATED_URL, timeout=30.0)
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPError as exc:
+            if cached:
+                # Stale beats empty: the catalog changes when Runware ships a
+                # model, not by the minute.
+                logger.warning("could not refresh Runware's catalog (%s); serving the held copy", exc)
+                return cached
+            raise ProviderError(f"could not reach Runware's catalog: {exc}") from exc
+
+        entries = payload if isinstance(payload, list) else payload.get("results") or []
+        # `weight` is the catalog's own prominence, and it is the order Runware
+        # shows these in. Sorting by name instead would open the list on six
+        # background removers.
+        entries = sorted(
+            entries,
+            key=lambda entry: (-float(entry.get("weight") or 0), str(entry.get("name") or "")),
+        )
+        models = [self._model(entry) for entry in entries]
+        with _curated_lock:
+            _curated_cache = (time.monotonic(), models)
+        return models
+
     def search_catalog(
         self,
         *,
@@ -192,33 +241,45 @@ class RunwareProvider(Provider):
         limit: int = 60,
         include_routers: bool = False,
     ) -> ModelPage:
+        if kind != "community":
+            return super().search_catalog(
+                query=query, kind=kind, limit=limit, include_routers=include_routers
+            )
+
+        # The community mirror is the rest of civitai: hundreds of thousands of
+        # checkpoints, reachable only through the paid API and only by
+        # searching. It is a deliberate second step, not the default view.
         task: dict = {
             "taskType": "modelSearch",
             "search": query.strip(),
+            "category": GENERATOR_CATEGORY,
             "limit": max(1, min(100, limit)),
             "offset": 0,
             "sort": "popularity",
         }
-        if kind == "image":
-            # Only checkpoints generate; the rest of the catalog is LoRAs and
-            # VAEs that attach to one.
-            task["category"] = GENERATOR_CATEGORY
-
         data = self._run(task, timeout=60.0)
         entry = data[0] if data else {}
         models = [self._model(result) for result in entry.get("results") or []]
-        if kind == "image":
-            models = [model for model in models if model.makes_images]
+        models = [model for model in models if model.makes_images]
         return ModelPage(
             models=models,
             total=int(entry.get("totalResults") or len(models)),
-            # A searchable catalog has no total to report: what "all of Runware"
+            # A searched catalog has no total to report: what the whole mirror
             # holds is not a number the operator could act on.
             catalog_total=0,
         )
 
     def get_model(self, model_id: str) -> RemoteModel | None:
-        """Resolve one AIR identifier. Runware's search matches it directly."""
+        """Resolve one AIR identifier.
+
+        The curated catalog answers for free and covers everything the tab
+        shows by default. Only a community model has to be looked up on the
+        paid API, where the search matches an AIR id directly.
+        """
+        found = next((m for m in self.list_models() if m.id == model_id), None)
+        if found is not None or not self.api_key:
+            return found
+
         data = self._run(
             {
                 "taskType": "modelSearch",
@@ -237,28 +298,48 @@ class RunwareProvider(Provider):
 
     @staticmethod
     def _model(entry: dict) -> RemoteModel:
+        """One catalog entry, from either surface.
+
+        The curated document and `modelSearch` describe the same thing with
+        different field names — `headline` against `shortDescription`,
+        `coverImage` against `heroImage`, `creator` against `provider` — so
+        both spellings are read here rather than in two mapping functions that
+        would drift apart.
+        """
         air = str(entry.get("air") or "")
         category = str(entry.get("category") or "").lower()
         capabilities = _squash(entry.get("capabilities"))
 
         if capabilities:
-            makes = bool(capabilities & MAKES_IMAGES)
+            # Two conditions, and both are needed. It has to end in a picture —
+            # a video model declaring `op:edit` edits video — and it has to
+            # draw rather than post-process, which an `op:upscale` head does
+            # not, however faithfully it returns an image.
+            makes = bool(capabilities & OUTPUTS_IMAGE) and (
+                "texttoimage" in capabilities or bool(capabilities & EDITS_IMAGES)
+            )
             reads = bool(capabilities & READS_IMAGES)
         else:
-            # Older entries declare no capabilities. A checkpoint generates from
-            # a prompt by definition; whether it also accepts a reference is not
-            # something to assume, so an edit is refused rather than attempted.
+            # Much of the community mirror declares no capabilities at all. A
+            # checkpoint generates from a prompt by definition; whether it also
+            # accepts a reference is not something to assume, so an edit is
+            # refused rather than attempted and billed.
             makes = category == GENERATOR_CATEGORY
             reads = False
 
-        description = str(entry.get("shortDescription") or entry.get("comment") or "").strip()
-        architecture = entry.get("architecture")
-        tags = [str(tag) for tag in entry.get("tags") or []]
+        description = str(
+            entry.get("headline")
+            or entry.get("shortDescription")
+            or entry.get("comment")
+            or ""
+        ).strip()
         # The architecture is what tells FLUX from SDXL from Qwen, and it is the
-        # first thing an operator looks for. The catalog list shows the
-        # description, so it goes in there rather than into a field the UI would
-        # have to learn about.
-        prefix = " · ".join(part for part in [architecture, ", ".join(tags[:4])] if part)
+        # first thing an operator looks for. The list shows the description, so
+        # it goes in there rather than into a field the UI would have to learn.
+        tags = [str(tag) for tag in entry.get("tags") or []]
+        prefix = " · ".join(
+            part for part in [entry.get("architecture"), ", ".join(tags[:4])] if part
+        )
         if prefix:
             description = f"{prefix} — {description}" if description else str(prefix)
 
@@ -269,8 +350,11 @@ class RunwareProvider(Provider):
             input_modalities=("text",) + (("image",) if reads else ()),
             output_modalities=("image",) if makes else (),
             # Runware prices per generation, from the model and the size asked
-            # for; there is no per-image figure in the catalog to quote here.
-            price_image=None,
+            # for. The curated catalog quotes that as a sentence rather than a
+            # per-unit number, so it is carried as one.
+            price_note=(str(entry.get("pricingOverview") or "").strip() or None),
+            cover_image=(str(entry.get("coverImage") or entry.get("heroImage") or "") or None),
+            creator=str(entry.get("creator") or entry.get("provider") or ""),
         )
 
     # ------------------------------------------------------------- generation

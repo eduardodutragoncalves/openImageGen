@@ -72,21 +72,35 @@ test.describe("web models", () => {
     await expect(page.getByText(/^not set$/i)).toBeVisible();
   });
 
-  test("a catalog that needs a key says so instead of failing", async ({ page }) => {
+  test("the curated catalog browses without a key", async ({ page }) => {
     await unlock(page);
     await page.goto("/models");
     await page.getByRole("button", { name: /web models/i }).click();
     await page.getByRole("button", { name: /^runware$/i }).click();
 
-    // No key in this environment, and Runware's catalog is not public: the tab
-    // must offer the field rather than report an error.
-    await expect(page.getByText(/catalog is not public/i)).toBeVisible();
+    // No key in this environment. The curated catalog is public, so there is
+    // something to look at, and no alarm.
+    await expect(page.getByRole("listitem").first()).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.getByLabel(/runware api key/i)).toBeVisible();
 
-    // And it offers only the filters Runware can honour.
+    // It offers only the filters Runware can honour.
     await expect(page.getByRole("button", { name: /image generators/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /community models/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /text models/i })).toHaveCount(0);
+  });
+
+  test("the community mirror waits for a query rather than guessing", async ({ page }) => {
+    await unlock(page);
+    await page.goto("/models");
+    await page.getByRole("button", { name: /web models/i }).click();
+    await page.getByRole("button", { name: /^runware$/i }).click();
+    await page.getByRole("button", { name: /community models/i }).click();
+
+    // Hundreds of thousands of checkpoints: there is no default view, and the
+    // page says what to do instead of firing a request that cannot be useful.
+    await expect(page.getByText(/search it by name or AIR id/i)).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
   });
 
   test("choosing openrouter upsampling opens the model picker", async ({ page }) => {

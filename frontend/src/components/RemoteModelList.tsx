@@ -46,6 +46,20 @@ export function RemoteModelList({
                 onSelect ? "hover:bg-[var(--accent-wash)]" : ""
               } ${selected ? "bg-[var(--accent-wash)]" : ""}`}
             >
+              {model.cover_image ? (
+                // A square on the grid, like every other thumbnail in the
+                // system. It is the difference between a list of identifiers
+                // and a catalog you can read at a glance.
+                <img
+                  src={model.cover_image}
+                  alt=""
+                  loading="lazy"
+                  className="h-10 w-10 shrink-0 border border-[var(--rule)] object-cover"
+                  onError={(event) => {
+                    event.currentTarget.style.visibility = "hidden";
+                  }}
+                />
+              ) : null}
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                   <span className="text-[12px] font-semibold text-[var(--ink)]">{model.name}</span>
@@ -78,8 +92,14 @@ export function RemoteModelList({
                       <IconLayers size={10} /> reads images
                     </span>
                   ) : null}
+                  {model.creator ? <span>{model.creator}</span> : null}
                   {model.price_image ? (
                     <span className="font-mono tabular">${model.price_image}/image</span>
+                  ) : null}
+                  {model.price_note ? (
+                    // Quoted as the provider wrote it: a price rephrased is a
+                    // price misquoted.
+                    <span className="tabular">{model.price_note}</span>
                   ) : null}
                   {model.context_length ? (
                     <span className="font-mono tabular">

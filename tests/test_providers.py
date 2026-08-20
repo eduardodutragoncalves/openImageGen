@@ -180,23 +180,58 @@ class TestRegistry:
         with pytest.raises(ProviderError):
             registry.set_key("nope", "x")
 
-
 # --------------------------------------------------------------------- runware
-# Runware's catalog is searched rather than listed, so what is exercised here is
-# the request it builds and the mapping of its answer — the two places where a
-# wrong assumption would show up as an empty tab rather than as an exception.
+# Runware answers about its catalog twice: a curated document served publicly,
+# and the community mirror behind the paid API. What is exercised here is which
+# of the two a request reaches, and how an entry from either one is read — the
+# places where a wrong assumption shows up as an empty tab rather than as an
+# exception.
 
-RUNWARE_RESULTS = [
+CURATED = [
     {
         "air": "bfl:flux@2-dev",
         "name": "FLUX.2 [dev]",
-        "category": "checkpoint",
-        "architecture": "flux2",
-        "capabilities": ["text-to-image", "image-to-image"],
-        "tags": ["photorealistic", "base model"],
-        "shortDescription": "Black Forest Labs' open weights model.",
-        "private": False,
+        "creator": "black-forest-labs",
+        "weight": 9,
+        "headline": "Black Forest Labs' open weights model.",
+        "capabilities": ["io:text-to-image", "io:image-to-image", "op:edit", "form:checkpoint"],
+        "coverImage": "https://assets.runware.ai/covers/flux-2-dev.jpg",
+        "pricingOverview": "$0.03 per image output",
     },
+    {
+        "air": "ideogram:4@0",
+        "name": "Ideogram 4.0",
+        "creator": "ideogram",
+        "weight": 7,
+        "headline": "Typography that survives a render.",
+        "capabilities": ["io:text-to-image", "form:checkpoint"],
+    },
+    {
+        # Returns an image, faithfully, but not a picture of what you wrote.
+        "air": "topazlabs:wonder@3.5",
+        "name": "Topaz Labs Wonder 3.5",
+        "creator": "topazlabs",
+        "weight": 8,
+        "capabilities": ["io:image-to-image", "op:upscale", "form:checkpoint"],
+    },
+    {
+        # Declares op:edit, but everything it outputs is video.
+        "air": "xai:grok-imagine@video",
+        "name": "Grok Imagine Video",
+        "creator": "xai",
+        "weight": 8,
+        "capabilities": ["io:text-to-video", "io:image-to-video", "op:edit", "form:checkpoint"],
+    },
+    {
+        "air": "zai:glm@5.3",
+        "name": "GLM-5.3",
+        "creator": "zai",
+        "weight": 6,
+        "capabilities": ["io:text-to-text", "form:checkpoint"],
+    },
+]
+
+COMMUNITY_RESULTS = [
     {
         "air": "civitai:305149@392545",
         "name": "Promissing_Realistic_XL",
@@ -204,39 +239,50 @@ RUNWARE_RESULTS = [
         "architecture": "sdxl",
         "capabilities": ["textToImage"],
         "tags": ["photorealistic"],
-        "private": False,
+        "heroImage": "https://mim.runware.ai/r/66a70a0bb7c38-450x450.jpg",
+        "provider": "civitai",
     },
     {
         "air": "civitai:1@2",
-        "name": "A Style LoRA",
-        "category": "lora",
-        "architecture": "sdxl",
-        "capabilities": [],
-        "private": False,
-    },
-    {
-        "air": "runware:legacy@1",
         "name": "An Older Checkpoint",
         "category": "checkpoint",
-        "private": False,
+        "architecture": "sd15",
     },
 ]
 
 
-class _Recorder:
-    """Stands in for httpx.post and keeps what was sent."""
+@pytest.fixture(autouse=True)
+def _forget_the_curated_catalog():
+    """The curated document is cached across provider instances, which is the
+    point of it — but a cache that outlives a test would answer the next one."""
+    from app.providers import runware as module
 
-    def __init__(self, payload, status=200):
+    module._curated_cache = (0.0, [])
+    yield
+    module._curated_cache = (0.0, [])
+
+
+class _Recorder:
+    """Stands in for an httpx verb and keeps what was sent."""
+
+    def __init__(self, payload, status=200, raises=None):
         self.payload = payload
         self.status = status
+        self.raises = raises
         self.sent = []
 
     def __call__(self, url, *, headers=None, json=None, timeout=None):
         self.sent.append({"url": url, "headers": headers or {}, "body": json})
+        if self.raises is not None:
+            raise self.raises
         recorder = self
 
         class _Response:
             status_code = recorder.status
+
+            @staticmethod
+            def raise_for_status():
+                return None
 
             @staticmethod
             def json():
@@ -245,7 +291,17 @@ class _Recorder:
         return _Response()
 
 
-def _runware(monkeypatch, payload, *, key="rw-key", status=200):
+def _curated(monkeypatch, entries=None, **kwargs):
+    """A Runware provider whose curated catalog is the given document."""
+    from app.providers.runware import RunwareProvider
+
+    recorder = _Recorder(CURATED if entries is None else entries, **kwargs)
+    monkeypatch.setattr("httpx.get", recorder)
+    return RunwareProvider(api_key=kwargs.pop("key", None)), recorder
+
+
+def _paid(monkeypatch, payload, *, key="rw-key", status=200):
+    """A provider whose paid API answers with the given payload."""
     from app.providers.runware import RunwareProvider
 
     recorder = _Recorder(payload, status)
@@ -253,7 +309,7 @@ def _runware(monkeypatch, payload, *, key="rw-key", status=200):
     return RunwareProvider(api_key=key), recorder
 
 
-def _catalog(results, total=None):
+def _search_payload(results, total=None):
     return {
         "data": [
             {
@@ -266,113 +322,152 @@ def _catalog(results, total=None):
     }
 
 
-class TestRunwareCatalog:
-    def test_the_image_filter_asks_for_checkpoints_and_drops_the_rest(self, monkeypatch):
-        provider, recorder = _runware(monkeypatch, _catalog(RUNWARE_RESULTS))
-        page = provider.search_catalog(query="realistic", kind="image", limit=10)
+class TestCuratedCatalog:
+    def test_it_is_readable_without_a_key(self, monkeypatch):
+        def _refuse(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("the paid API was called to browse the catalog")
+
+        monkeypatch.setattr("httpx.post", _refuse)
+        provider, recorder = _curated(monkeypatch)
+
+        page = provider.search_catalog(kind="image")
+        assert recorder.sent[0]["url"] == "https://content.runware.ai/models"
+        assert "Authorization" not in recorder.sent[0]["headers"]
+        assert page.catalog_total == len(CURATED)
+
+    def test_only_the_models_that_draw_are_offered(self, monkeypatch):
+        provider, _ = _curated(monkeypatch)
+        assert [m.id for m in provider.search_catalog(kind="image").models] == [
+            "bfl:flux@2-dev",
+            "ideogram:4@0",
+        ]
+
+    def test_what_returns_an_image_is_not_the_same_as_what_draws_one(self, monkeypatch):
+        """The three near misses, each excluded for its own reason."""
+        provider, _ = _curated(monkeypatch)
+        models = {m.id: m for m in provider.search_catalog(kind="all").models}
+
+        # An upscaler returns an image, faithfully, but not one of what you wrote.
+        assert models["topazlabs:wonder@3.5"].makes_images is False
+        assert models["topazlabs:wonder@3.5"].reads_images is True
+        # A video model that declares op:edit edits video.
+        assert models["xai:grok-imagine@video"].makes_images is False
+        # And a text model is a text model.
+        assert models["zai:glm@5.3"].makes_images is False
+
+    def test_the_namespaced_taxonomy_is_understood(self, monkeypatch):
+        """Runware's vocabulary is namespaced — io: for what goes in and out,
+        op: for what the model does, form: for what it is. Matching the bare
+        word against `io:text-to-image` classifies every model as generating
+        nothing, and the tab comes back empty."""
+        provider, _ = _curated(monkeypatch)
+        flux = provider.get_model("bfl:flux@2-dev")
+        assert flux is not None
+        assert flux.makes_images is True
+        assert flux.reads_images is True
+
+    def test_the_spelling_of_a_capability_does_not_matter(self, monkeypatch):
+        entry = dict(CURATED[0], capabilities=["Text to Image", "Inpainting"])
+        provider, _ = _curated(monkeypatch, [entry])
+        model = provider.search_catalog(kind="all").models[0]
+        assert model.makes_images is True
+        assert model.reads_images is True
+
+    def test_the_catalog_is_ordered_the_way_runware_orders_it(self, monkeypatch):
+        provider, _ = _curated(monkeypatch)
+        # By weight, not by name: sorting alphabetically opens the list on
+        # whatever happens to start with a B.
+        assert [m.id for m in provider.search_catalog(kind="all").models] == [
+            "bfl:flux@2-dev",  # weight 9
+            "xai:grok-imagine@video",  # weight 8, and G sorts before T
+            "topazlabs:wonder@3.5",  # weight 8
+            "ideogram:4@0",  # weight 7
+            "zai:glm@5.3",  # weight 6
+        ]
+
+    def test_a_cover_and_a_quoted_price_survive(self, monkeypatch):
+        provider, _ = _curated(monkeypatch)
+        flux = provider.get_model("bfl:flux@2-dev")
+        assert flux.cover_image.endswith("flux-2-dev.jpg")
+        assert flux.creator == "black-forest-labs"
+        # Quoted as written: rewriting someone's pricing is how you misquote it.
+        assert flux.price_note == "$0.03 per image output"
+
+    def test_the_document_is_fetched_once(self, monkeypatch):
+        provider, recorder = _curated(monkeypatch)
+        provider.search_catalog(kind="image")
+        provider.search_catalog(kind="all")
+        provider.get_model("bfl:flux@2-dev")
+        assert len(recorder.sent) == 1
+
+    def test_a_held_copy_outlives_a_failed_refresh(self, monkeypatch):
+        import httpx
+
+        provider, _ = _curated(monkeypatch)
+        assert provider.search_catalog(kind="image").models
+
+        # The catalog changes when Runware ships a model, not by the minute:
+        # stale beats empty.
+        monkeypatch.setattr("httpx.get", _Recorder(None, raises=httpx.ConnectError("down")))
+        assert provider.search_catalog(kind="image").models
+
+    def test_an_unreachable_catalog_with_nothing_held_is_an_error(self, monkeypatch):
+        import httpx
+
+        from app.providers import ProviderError
+        from app.providers.runware import RunwareProvider
+
+        monkeypatch.setattr("httpx.get", _Recorder(None, raises=httpx.ConnectError("down")))
+        with pytest.raises(ProviderError, match="could not reach"):
+            RunwareProvider(api_key=None).search_catalog()
+
+
+class TestCommunityMirror:
+    def test_it_searches_the_paid_api_for_checkpoints(self, monkeypatch):
+        provider, recorder = _paid(monkeypatch, _search_payload(COMMUNITY_RESULTS, total=4210))
+        page = provider.search_catalog(query="realistic", kind="community", limit=10)
 
         body = recorder.sent[0]["body"][0]
         assert body["taskType"] == "modelSearch"
         assert body["search"] == "realistic"
         assert body["category"] == "checkpoint"
-        assert body["limit"] == 10
         assert recorder.sent[0]["headers"]["Authorization"] == "Bearer rw-key"
+        assert [m.id for m in page.models] == ["civitai:305149@392545", "civitai:1@2"]
 
-        # A LoRA is an ingredient, not something you can generate with.
-        assert [model.id for model in page.models] == [
-            "bfl:flux@2-dev",
-            "civitai:305149@392545",
-            "runware:legacy@1",
-        ]
+    def test_an_entry_declaring_nothing_is_taken_as_text_to_image(self, monkeypatch):
+        provider, _ = _paid(monkeypatch, _search_payload(COMMUNITY_RESULTS))
+        models = {m.id: m for m in provider.search_catalog(kind="community").models}
+        # A checkpoint draws by definition; that it also accepts a reference is
+        # not something to assume, so an edit is refused rather than billed.
+        assert models["civitai:1@2"].makes_images is True
+        assert models["civitai:1@2"].reads_images is False
 
-    def test_capabilities_decide_what_takes_a_reference(self, monkeypatch):
-        provider, _ = _runware(monkeypatch, _catalog(RUNWARE_RESULTS))
-        models = {model.id: model for model in provider.search_catalog(kind="all").models}
-
-        assert models["bfl:flux@2-dev"].reads_images is True
-        # Declared text-to-image only: an edit would be refused before it costs
-        # anything.
-        assert models["civitai:305149@392545"].reads_images is False
-        # No capabilities at all: a checkpoint generates, but nothing is assumed
-        # about what it accepts.
-        assert models["runware:legacy@1"].makes_images is True
-        assert models["runware:legacy@1"].reads_images is False
-        assert models["civitai:1@2"].makes_images is False
-
-    def test_capability_spelling_does_not_matter(self, monkeypatch):
-        entry = dict(RUNWARE_RESULTS[0], capabilities=["Text to Image", "Inpainting"])
-        provider, _ = _runware(monkeypatch, _catalog([entry]))
-        model = provider.search_catalog(kind="all").models[0]
-        assert model.makes_images is True
-        assert model.reads_images is True
-
-    def test_the_namespaced_taxonomy_is_understood(self, monkeypatch):
-        """Runware's own vocabulary is namespaced — io: for what goes in and
-        out, op: for what the model does, form: for what kind of artefact it
-        is. Matching the bare word against `io:text-to-image` would classify
-        every model as generating nothing, and the tab would come back empty.
-        """
-        catalog = [
-            dict(
-                RUNWARE_RESULTS[0],
-                air="xai:grok-imagine@image-2.0",
-                capabilities=["io:text-to-image", "io:image-to-image", "form:checkpoint"],
-            ),
-            dict(
-                RUNWARE_RESULTS[0],
-                air="zai:glm@5.3",
-                capabilities=["io:text-to-text", "form:checkpoint"],
-            ),
-            dict(
-                RUNWARE_RESULTS[0],
-                air="lightricks:ltx@2.5-fast",
-                capabilities=["io:text-to-video", "io:image-to-video", "form:checkpoint"],
-            ),
-            dict(
-                RUNWARE_RESULTS[0],
-                air="topazlabs:wonder@3.5",
-                capabilities=["op:upscale", "form:checkpoint"],
-            ),
-        ]
-        provider, _ = _runware(monkeypatch, _catalog(catalog))
-        models = {model.id: model for model in provider.search_catalog(kind="all").models}
-
-        assert models["xai:grok-imagine@image-2.0"].makes_images is True
-        assert models["xai:grok-imagine@image-2.0"].reads_images is True
-        # A text model, a video model and an upscaler all return something, but
-        # none of them returns a picture of what you asked for.
-        assert models["zai:glm@5.3"].makes_images is False
-        assert models["lightricks:ltx@2.5-fast"].makes_images is False
-        assert models["topazlabs:wonder@3.5"].makes_images is False
-        assert models["topazlabs:wonder@3.5"].reads_images is True
-
-    def test_the_architecture_is_carried_into_what_the_operator_reads(self, monkeypatch):
-        provider, _ = _runware(monkeypatch, _catalog(RUNWARE_RESULTS))
-        model = provider.search_catalog(kind="all").models[0]
-        assert "flux2" in model.description
-        assert "Black Forest Labs" in model.description
-
-    def test_a_searched_catalog_reports_no_total(self, monkeypatch):
-        provider, _ = _runware(monkeypatch, _catalog(RUNWARE_RESULTS, total=4210))
-        page = provider.search_catalog(kind="all")
-        # There is no "of N" to show: the number would be the size of civitai.
-        assert page.catalog_total == 0
+    def test_the_mirror_reports_no_total_to_be_a_fraction_of(self, monkeypatch):
+        provider, _ = _paid(monkeypatch, _search_payload(COMMUNITY_RESULTS, total=4210))
+        page = provider.search_catalog(kind="community")
         assert page.total == 4210
+        assert page.catalog_total == 0
 
-    def test_a_model_is_resolved_by_its_air(self, monkeypatch):
-        provider, recorder = _runware(monkeypatch, _catalog(RUNWARE_RESULTS))
+    def test_it_needs_a_key(self, monkeypatch):
+        from app.providers import ProviderError
+        from app.providers.runware import RunwareProvider
+
+        def _fail(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("the paid API was called without a key")
+
+        monkeypatch.setattr("httpx.post", _fail)
+        with pytest.raises(ProviderError, match="needs an API key"):
+            RunwareProvider(api_key=None).search_catalog(kind="community", query="x")
+
+    def test_a_community_pin_is_resolved_by_its_air(self, monkeypatch):
+        provider, recorder = _paid(monkeypatch, _search_payload(COMMUNITY_RESULTS))
+        monkeypatch.setattr("httpx.get", _Recorder(CURATED))
+
         model = provider.get_model("civitai:305149@392545")
-        assert model is not None
-        assert model.name == "Promissing_Realistic_XL"
+        assert model is not None and model.name == "Promissing_Realistic_XL"
+        # Curated first — free — and only then the paid lookup.
         assert recorder.sent[0]["body"][0]["search"] == "civitai:305149@392545"
         assert provider.get_model("nobody:nothing@0") is None
-
-    def test_the_catalog_cannot_be_listed_in_full(self, monkeypatch):
-        from app.providers import ProviderError
-
-        provider, _ = _runware(monkeypatch, _catalog([]))
-        with pytest.raises(ProviderError, match="search it instead"):
-            provider.list_models()
 
 
 class TestRunwareErrors:
@@ -391,36 +486,25 @@ class TestRunwareErrors:
     def test_a_rejected_key_is_reported_as_one(self, monkeypatch):
         from app.providers import ProviderError
 
-        provider, _ = _runware(monkeypatch, self._error("invalidApiKey"), status=401)
+        provider, _ = _paid(monkeypatch, self._error("invalidApiKey"), status=401)
         with pytest.raises(ProviderError, match="rejected the API key"):
-            provider.search_catalog()
+            provider.search_catalog(kind="community", query="x")
 
     def test_an_empty_account_says_so(self, monkeypatch):
         from app.providers import ProviderError
 
-        provider, _ = _runware(monkeypatch, self._error("insufficientCredits"), status=402)
+        provider, _ = _paid(monkeypatch, self._error("insufficientCredits"), status=402)
         with pytest.raises(ProviderError, match="no credit left"):
-            provider.search_catalog()
+            provider.search_catalog(kind="community", query="x")
 
     def test_a_refused_search_term_says_what_to_do(self, monkeypatch):
         from app.providers import ProviderError
 
-        provider, _ = _runware(
+        provider, _ = _paid(
             monkeypatch, self._error("invalidParameter", parameter="search"), status=400
         )
         with pytest.raises(ProviderError, match="Type a model name or an AIR id"):
-            provider.search_catalog()
-
-    def test_without_a_key_nothing_is_attempted(self, monkeypatch):
-        from app.providers import ProviderError
-        from app.providers.runware import RunwareProvider
-
-        def _fail(*args, **kwargs):  # pragma: no cover - must not be reached
-            raise AssertionError("the catalog was requested without a key")
-
-        monkeypatch.setattr("httpx.post", _fail)
-        with pytest.raises(ProviderError, match="not public"):
-            RunwareProvider(api_key=None).search_catalog()
+            provider.search_catalog(kind="community", query="x")
 
 
 class TestRunwareGeneration:
@@ -446,7 +530,7 @@ class TestRunwareGeneration:
         }
 
     def test_a_generation_asks_for_bytes_not_a_link(self, monkeypatch):
-        provider, recorder = _runware(monkeypatch, self._image_payload())
+        provider, recorder = _paid(monkeypatch, self._image_payload())
         images = provider.generate(model="bfl:flux@2-dev", prompt="a lighthouse")
 
         body = recorder.sent[0]["body"][0]
@@ -458,7 +542,7 @@ class TestRunwareGeneration:
         assert len(images) == 1 and images[0].size == (8, 8)
 
     def test_sizes_are_squared_up_to_what_runware_accepts(self, monkeypatch):
-        provider, recorder = _runware(monkeypatch, self._image_payload())
+        provider, recorder = _paid(monkeypatch, self._image_payload())
         provider.generate(model="bfl:flux@2-dev", prompt="x", width=1200, height=90)
         body = recorder.sent[0]["body"][0]
         assert body["width"] == 1216  # nearest multiple of 64
@@ -467,7 +551,7 @@ class TestRunwareGeneration:
     def test_references_go_up_as_data_uris(self, monkeypatch):
         from PIL import Image
 
-        provider, recorder = _runware(monkeypatch, self._image_payload())
+        provider, recorder = _paid(monkeypatch, self._image_payload())
         provider.generate(
             model="bfl:flux@2-dev", prompt="x", references=[Image.new("RGB", (32, 32))]
         )
@@ -477,7 +561,7 @@ class TestRunwareGeneration:
     def test_an_answer_without_an_image_is_an_error(self, monkeypatch):
         from app.providers import ProviderError
 
-        provider, _ = _runware(monkeypatch, {"data": [{"taskType": "imageInference"}]})
+        provider, _ = _paid(monkeypatch, {"data": [{"taskType": "imageInference"}]})
         with pytest.raises(ProviderError, match="returned no image"):
             provider.generate(model="bfl:flux@2-dev", prompt="x")
 
@@ -490,9 +574,9 @@ class TestBothProviders:
         registry = ProviderRegistry(Settings(_env_file=None, state_dir=tmp_path))
         kinds = {entry["id"]: entry["kinds"] for entry in registry.list_providers()}
         assert kinds["openrouter"] == ["image", "text", "all"]
-        # Runware hosts image checkpoints; a text filter there would only ever
-        # come back empty.
-        assert kinds["runware"] == ["image", "all"]
+        # Runware hosts image checkpoints, so a text filter there would only
+        # ever come back empty; "community" is the mirror behind the paid API.
+        assert kinds["runware"] == ["image", "all", "community"]
 
     def test_the_environment_key_is_found_per_provider(self, tmp_path):
         from app.config import Settings
@@ -518,16 +602,24 @@ class TestProviderRoutes:
         assert set(entries) == {"openrouter", "runware"}
         for entry in entries.values():
             assert "key" not in entry and "api_key" not in entry
-        assert entries["runware"]["catalog_is_public"] is False
-        assert entries["runware"]["kinds"] == ["image", "all"]
+        # Runware's curated catalog is served publicly; only the community
+        # mirror and generation need the credential.
+        assert entries["runware"]["catalog_is_public"] is True
+        assert entries["runware"]["kinds"] == ["image", "all", "community"]
 
-    def test_a_catalog_needing_a_key_answers_409_not_502(self, client):
-        response = client.get("/v1/providers/runware/models")
+    def test_a_search_that_needs_a_key_answers_409_not_502(self, client):
+        # Browsing is free; reaching the community mirror is not, and a missing
+        # credential is a step rather than a failure of the provider.
+        response = client.get(
+            "/v1/providers/runware/models", params={"kind": "community", "q": "sdxl"}
+        )
         assert response.status_code == 409
         assert "API key" in response.json()["detail"]
 
     def test_a_filter_the_provider_cannot_honour_is_refused(self, client):
         response = client.get("/v1/providers/runware/models", params={"kind": "text"})
+        assert response.status_code == 422
+        response = client.get("/v1/providers/openrouter/models", params={"kind": "community"})
         assert response.status_code == 422
 
     def test_an_unknown_provider_is_a_404(self, client):

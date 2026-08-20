@@ -31,7 +31,7 @@ export function WebModels() {
   const providers = useProviders();
   const [providerId, setProviderId] = useState<string>("openrouter");
   const [query, setQuery] = useState("");
-  const [kind, setKind] = useState<"image" | "text" | "all">("image");
+  const [kind, setKind] = useState<"image" | "text" | "all" | "community">("image");
 
   const provider = (providers.data ?? []).find((entry) => entry.id === providerId);
   // Not every provider has every kind of model. Runware hosts image
@@ -43,10 +43,13 @@ export function WebModels() {
   // it is a step: show the key field and say so.
   const needsKey = Boolean(provider && !provider.catalog_is_public && !provider.configured);
 
+  // The community mirror has no default view: it is hundreds of thousands of
+  // checkpoints, and there is nothing to show until you say what you are after.
+  const awaitingQuery = shownKind === "community" && !query.trim();
   const models = useProviderModels(
     providerId,
     { q: query, kind: shownKind, limit: 80 },
-    !needsKey,
+    !needsKey && !awaitingQuery,
   );
   // A catalog with no total to report is one that was searched, not listed:
   // there is no "all of it" to have shown.
@@ -118,6 +121,7 @@ export function WebModels() {
               ["image", "image generators"],
               ["text", "text models"],
               ["all", "everything"],
+              ["community", "community models"],
             ] as const
           )
             .filter(([value]) => kinds.includes(value))
@@ -177,6 +181,11 @@ export function WebModels() {
       {needsKey ? (
         <p className="border border-[var(--rule)] px-3 py-6 text-center text-xs text-[var(--ink-muted)]">
           {provider?.label}&rsquo;s catalog is not public. Add a key above to browse it.
+        </p>
+      ) : awaitingQuery ? (
+        <p className="border border-[var(--rule)] px-3 py-6 text-center text-xs text-[var(--ink-muted)]">
+          The community mirror holds hundreds of thousands of checkpoints. Search it by
+          name or AIR id.
         </p>
       ) : models.isLoading ? (
         <p className="text-xs text-[var(--ink-muted)]">Reading the catalog…</p>

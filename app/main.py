@@ -921,8 +921,13 @@ def list_provider_models(
     q: str = Query(default="", description="Substring of the id, name or description"),
     kind: str = Query(
         default="image",
-        pattern="^(image|text|all)$",
-        description="'image' keeps only models that output images",
+        pattern="^(image|text|all|community)$",
+        description=(
+            "'image' keeps only models that output images, 'text' only text models, "
+            "'all' drops the filter. 'community' reaches past a provider's curated "
+            "catalog into everything it mirrors, where it has one. Which of these a "
+            "provider can honour is reported as `kinds` on /v1/providers."
+        ),
     ),
     limit: int = Query(default=60, ge=1, le=400),
     include_routers: bool = Query(default=False),
@@ -952,7 +957,10 @@ def list_provider_models(
             query=q, kind=kind, limit=limit, include_routers=include_routers
         )
     except ProviderError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # A provider without a credential has not failed; it is waiting for
+        # one, and the tab shows the key field rather than an alarm.
+        status = 409 if not provider.configured else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
     pinned = {entry.key for entry in _providers().pinned()}
     return RemoteModelPage(

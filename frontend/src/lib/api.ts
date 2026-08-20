@@ -143,7 +143,7 @@ export const api = {
 
   providerModels: (
     provider: string,
-    params: { q?: string; kind?: "image" | "text" | "all"; limit?: number },
+    params: { q?: string; kind?: "image" | "text" | "all" | "community"; limit?: number },
   ) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {

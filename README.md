@@ -343,7 +343,7 @@ billed by the provider instead of by your electricity.
 | Provider | Catalog | Reads without a key | Model ids |
 | --- | --- | --- | --- |
 | **OpenRouter** | ~400 models, fetched whole and filtered here | yes | `google/gemini-3-pro-image` |
-| **Runware** | a GPU marketplace mirroring civitai — searched, never listed | no | AIR: `bfl:flux@2-dev`, `civitai:305149@392545` |
+| **Runware** | a curated catalog, plus the civitai mirror behind it | the curated one, yes | AIR: `bfl:flux@2-dev`, `civitai:305149@392545` |
 
 Both answer the same three questions — what do you have, which of it makes
 images, and can you make one — so the tab, the pin list and the compose form do
@@ -371,28 +371,39 @@ answers is decided per request.
 
 ### Runware
 
-Runware is a GPU marketplace: FLUX, SDXL, Qwen and Seedream alongside a mirror
-of civitai. That scale changes how the catalog works. There are far too many
-models to fetch and filter here, so **every query is searched where it lives**
-— `q` becomes Runware's own `modelSearch`, which matches a name, a description
-or an AIR id — and the page reports how many matched rather than a fraction of
-a whole that has no meaning:
+Runware is a GPU marketplace: FLUX, SDXL, Qwen and Seedream on top of a mirror
+of civitai. It publishes its catalog twice, and this server reads both.
+
+**The curated catalog is public.** `content.runware.ai` serves a few hundred
+models with a cover image, a headline and a declared capability list, to anyone
+without a credential — the same catalog Runware's own model picker is built on.
+That is the default view, so the tab has something to show before a key exists:
 
 ```bash
-curl -s "localhost:8000/v1/providers/runware/models?q=flux&kind=image" \
-  -H "X-API-Key: $KEY" | jq '{shown: (.models|length), matched: .total}'
+curl -s "localhost:8000/v1/providers/runware/models?kind=image" \
+  -H "X-API-Key: $KEY" | jq '{generators: .total, catalog: .catalog_total}'
+# {"generators": 122, "catalog": 417}
 ```
 
-`kind=image` narrows the search to checkpoints, which are the only entries you
-can generate with — the rest of the catalog is LoRAs, VAEs and embeddings that
-attach to one. `kind=all` drops that filter; there is no `kind=text`, because
-Runware hosts no text models and the tab does not offer a filter that would
-only ever come back empty.
+**`kind=community` reaches the rest.** The civitai mirror is hundreds of
+thousands of checkpoints behind the paid API, so it is a deliberate second step
+rather than the default: it needs a key and a query, and it reports how many
+matched rather than a fraction of a whole that has no meaning. There is no
+`kind=text` — Runware hosts no text models, and a filter that only ever came
+back empty would just look broken.
 
-Whether a Runware model takes a reference image comes from its declared
-capabilities. An entry that declares none — much of the civitai mirror — is
-treated as text-to-image only, so an edit is refused here rather than paid for
-and rejected there.
+**What counts as a generator is two conditions, not one.** Runware's capability
+vocabulary is namespaced — `io:` for what goes in and out, `op:` for what the
+model does, `form:` for what kind of artefact it is — and a model qualifies only
+if it *ends in a picture* and *draws rather than post-processes*. Both halves
+earn their keep: a video model declaring `op:edit` edits video, and an
+`op:upscale` head returns an image, faithfully, but not a picture of what you
+wrote. Of 417 curated models, 122 pass.
+
+Whether one takes a reference image comes from the same declaration. An entry
+that declares nothing — much of the civitai mirror — is treated as
+text-to-image only, so an edit is refused here rather than paid for and
+rejected there.
 
 ### Pinning, and generating
 
@@ -474,7 +485,7 @@ cd frontend && npm run schema
 ## Tests
 
 ```bash
-pytest tests/                      # 67 checks, no GPU: runs under OIG_DRY_RUN
+pytest tests/                      # 74 checks, no GPU: runs under OIG_DRY_RUN
 cd frontend && npm run test:e2e    # the critical path in a real browser
 ```
 
@@ -566,7 +577,7 @@ app/
   providers/
     base.py          the Provider contract, catalog filtering, search
     openrouter.py    catalog, generation and prompt rewriting over HTTP
-    runware.py       modelSearch and imageInference over its task API
+    runware.py       the curated catalog, modelSearch, and imageInference
     registry.py      credentials (0600, server-side) and pinned models
   images.py          base64/PIL helpers, pixel budget
   main.py            FastAPI routes, auth, SPA hosting

@@ -105,7 +105,7 @@ export function useProviders(enabled = true) {
  *  cannot output an image cannot generate one here. */
 export function useProviderModels(
   provider: string,
-  params: { q?: string; kind?: "image" | "text" | "all"; limit?: number },
+  params: { q?: string; kind?: "image" | "text" | "all" | "community"; limit?: number },
   enabled = true,
 ) {
   return useQuery({

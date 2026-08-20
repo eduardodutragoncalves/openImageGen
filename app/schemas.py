@@ -319,6 +319,9 @@ class RemoteModelInfo(BaseModel):
     context_length: int | None = None
     price_image: str | None = None
     price_prompt: str | None = None
+    price_note: str | None = None
+    cover_image: str | None = None
+    creator: str = ""
     is_router: bool
     makes_images: bool
     reads_images: bool
