@@ -290,6 +290,20 @@ class ModelSwitchRequest(BaseModel):
         min_length=1,
         description="A catalog id (e.g. 'flux1-schnell') or a huggingface repo id.",
     )
+    placement: Literal["auto", "split", "single"] = Field(
+        default="auto",
+        description=(
+            "Where to put it. 'auto' lets the planner fit it, which is what makes "
+            "the largest checkpoints runnable at all. 'split' spreads the "
+            "transformer and the text encoder across two cards. 'single' pins the "
+            "whole model to one, leaving the other free."
+        ),
+    )
+    device: int | None = Field(
+        default=None,
+        ge=0,
+        description="Which GPU, for placement='single'. Omitted means the roomiest.",
+    )
 
 
 class ProviderInfoResponse(BaseModel):
@@ -349,6 +363,13 @@ class PinnedModelInfo(BaseModel):
     price_image: str | None = None
 
 
+class ProviderCheckResponse(BaseModel):
+    id: str
+    # "a key is set" and "a key works" are different claims; this is the second.
+    ok: bool
+    detail: str
+
+
 class ProviderKeyRequest(BaseModel):
     key: str = Field(min_length=1)
 
@@ -357,6 +378,24 @@ class PinRequest(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     model_id: str = Field(min_length=1)
+
+
+class HubModelInfo(BaseModel):
+    """A checkpoint on the Hugging Face hub, and what this machine knows of it."""
+
+    repo_id: str
+    downloads: int
+    likes: int
+    pipeline_tag: str | None = None
+    gated: bool = False
+    # Already in the local cache: loading it will not re-download.
+    cached: bool = False
+    # One of the checkpoints this service ships a tested profile for. Outside
+    # the catalog the architecture is guessed from the name and the footprints
+    # are estimates.
+    in_catalog: bool = False
+    catalog_id: str | None = None
+    family: str = "flux2"
 
 
 class GpuInfo(BaseModel):

@@ -128,9 +128,11 @@ redirects to `/docs` when no studio has been built.
 | `GET` | `/v1/files/{name}` | File saved when `response_format="url"` |
 | `GET` | `/v1/models` | Loaded model, placement, precision and per-model limits |
 | `GET` | `/v1/models/catalog` | Every known model, runnable here or not, with the reason |
-| `POST` | `/v1/models/load` | Replace the loaded model; returns `202` |
+| `POST` | `/v1/models/load` | Replace the loaded model; returns `202`. Takes `placement` and `device` |
+| `GET` | `/v1/models/search` | Search the Hugging Face hub for something to load (`?q=`, `?limit=`) |
 | `GET` | `/v1/models/status` | Where a load or swap has got to |
 | `GET` | `/v1/providers` | Remote catalogs this server can reach, and whether each has a key |
+| `POST` | `/v1/providers/{id}/check` | Spend one cheap call to find out whether the key **works** |
 | `PUT` | `/v1/providers/{id}/key` | Store a provider credential server-side |
 | `DELETE` | `/v1/providers/{id}/key` | Forget it |
 | `GET` | `/v1/providers/{id}/models` | Search a provider's catalog (`?q=`, `?kind=image\|text\|all`, `?limit=`) |
@@ -304,6 +306,34 @@ first-class state with real phases rather than a spinner, and anything queued
 during it runs once the new model is resident. If the swap fails, the previous
 model is reloaded and the failure is reported.
 
+### Where the weights go
+
+On a machine with one GPU there is nothing to decide. With two, there is, and
+the planner cannot make it for you: **splitting** a model across both cards is
+what makes FLUX.2 [dev] runnable at all, and it is also what stops you using
+the second card for anything else.
+
+```bash
+curl -X POST localhost:8000/v1/models/load \
+  -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+  -d '{"model": "flux1-dev", "placement": "single", "device": 1}'
+```
+
+`placement` is `auto` (the default, and what every earlier version did),
+`split`, or `single` with a `device`. Pinning a model whole to one card leaves
+the other free — but only a model that fits there:
+
+| Model | Total | Fits one 24GB card |
+| --- | --- | --- |
+| FLUX.2 [dev] 4-bit | 35 GB | no |
+| FLUX.2 [klein] 9B | 28 GB | no |
+| FLUX.2 [klein] 4B | 16.5 GB | yes |
+| FLUX.1 schnell / dev / Krea / Kontext | 10.5 GB | yes |
+
+An impossible placement is refused as a bad request — before the queue is
+drained, not a minute into a load — and a pinned load measures the card it was
+pinned to rather than the roomiest one.
+
 ### What the catalog holds
 
 | Family | Checkpoints | Notes |
@@ -435,6 +465,14 @@ Each provider has its own. The credential can come from the environment —
 set in the tab wins, is written `0600` to `providers.json` under
 `OIG_STATE_DIR`, and survives a restart without ever entering the repository.
 
+**"A key is set" and "a key works" are different claims**, and only the second
+one is worth showing someone about to spend money. `POST
+/v1/providers/{id}/check` spends one cheap authenticated call to find out —
+OpenRouter's `/key`, which costs no tokens, and for Runware a one-row
+`modelSearch`, because its curated catalog answers without a credential and so
+proves nothing. The answer is held for two minutes, and forgotten the moment
+the key changes.
+
 **It is never sent back.** `GET /v1/providers` answers `configured: true` and
 where the key came from — never the key itself, not even masked.
 
@@ -463,6 +501,13 @@ A single-page app built with Vite and served by this same process from
 - **Local and remote in one form.** A model pinned on the Web models tab is a
   choice next to the resident checkpoint, and the form shows only the controls
   that target will actually honour.
+- **One picker for the whole question.** "What makes this picture" used to be
+  answered in three places — the Models page, a repo id field at the bottom of
+  it, and a provider tab. **Other model** on the compose form opens all of them
+  at once: what runs on your cards, what the hub has that would need
+  downloading first, and each provider's catalog with a mark saying whether its
+  key was actually tried and accepted. Choosing a local one asks where to put
+  it; choosing a remote one pins it and puts it on the form.
 - **History is scoped per API key**, so on a shared server each person sees
   their own work. Give each person their own entry in `OIG_API_KEYS`.
 
@@ -485,7 +530,7 @@ cd frontend && npm run schema
 ## Tests
 
 ```bash
-pytest tests/                      # 74 checks, no GPU: runs under OIG_DRY_RUN
+pytest tests/                      # 109 checks, no GPU: runs under OIG_DRY_RUN
 cd frontend && npm run test:e2e    # the critical path in a real browser
 ```
 
@@ -578,6 +623,7 @@ app/
     base.py          the Provider contract, catalog filtering, search
     openrouter.py    catalog, generation and prompt rewriting over HTTP
     runware.py       the curated catalog, modelSearch, and imageInference
+  hub.py             searching Hugging Face for something to load
     registry.py      credentials (0600, server-side) and pinned models
   images.py          base64/PIL helpers, pixel budget
   main.py            FastAPI routes, auth, SPA hosting

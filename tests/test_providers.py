@@ -625,3 +625,110 @@ class TestProviderRoutes:
     def test_an_unknown_provider_is_a_404(self, client):
         assert client.get("/v1/providers/nope/models").status_code == 404
         assert client.post("/v1/providers/nope/pin", json={"model_id": "x"}).status_code == 404
+
+
+class TestKeyChecking:
+    """"A key is set" and "a key works" are different claims, and only the
+    second one is worth showing someone about to spend money."""
+
+    def test_no_key_is_not_a_failed_check(self, monkeypatch):
+        from app.providers.runware import RunwareProvider
+
+        def _refuse(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("a request was made with no key to send")
+
+        monkeypatch.setattr("httpx.post", _refuse)
+        result = RunwareProvider(api_key=None).check_key()
+        assert result.ok is False
+        assert result.detail == "no key set"
+
+    def test_a_working_key_spends_one_cheap_call(self, monkeypatch):
+        provider, recorder = _paid(monkeypatch, _search_payload(COMMUNITY_RESULTS[:1]))
+        result = provider.check_key()
+        assert result.ok is True
+        body = recorder.sent[0]["body"][0]
+        # One row, not a page: the answer is the status code, not the payload.
+        assert body["taskType"] == "modelSearch" and body["limit"] == 1
+
+    def test_runware_is_checked_against_the_paid_api_not_the_public_one(self, monkeypatch):
+        """The curated catalog answers without a credential, so reading it
+        proves nothing about the key."""
+        provider, recorder = _paid(monkeypatch, _search_payload([]))
+        monkeypatch.setattr("httpx.get", _Recorder(CURATED))
+        provider.check_key()
+        assert recorder.sent, "the check never touched the paid API"
+
+    def test_a_rejected_key_is_reported_rather_than_raised(self, monkeypatch):
+        provider, _ = _paid(
+            monkeypatch,
+            {"errors": [{"code": "invalidApiKey", "message": "no", "parameter": "apiKey"}]},
+            status=401,
+        )
+        result = provider.check_key()
+        assert result.ok is False
+        assert "rejected the API key" in result.detail
+
+    def test_an_unreachable_provider_is_a_failed_check_not_an_exception(self, monkeypatch):
+        import httpx
+
+        from app.providers.runware import RunwareProvider
+
+        monkeypatch.setattr("httpx.post", _Recorder(None, raises=httpx.ConnectError("down")))
+        result = RunwareProvider(api_key="rw-key").check_key()
+        assert result.ok is False and "could not reach" in result.detail
+
+    def test_openrouter_asks_the_endpoint_that_costs_no_tokens(self, monkeypatch):
+        from app.providers.openrouter import OpenRouterProvider
+
+        recorder = _Recorder({"data": {"label": "a key"}})
+        monkeypatch.setattr("httpx.get", recorder)
+        result = OpenRouterProvider(api_key="sk-or-x").check_key()
+        assert result.ok is True
+        assert recorder.sent[0]["url"].endswith("/key")
+        assert recorder.sent[0]["headers"]["Authorization"] == "Bearer sk-or-x"
+
+
+class TestCheckCaching:
+    """Every check costs a request to the provider, and the picker asks on
+    every opening."""
+
+    def _registry(self, tmp_path, monkeypatch, results):
+        from app.config import Settings
+        from app.providers import KeyCheck, ProviderRegistry
+
+        registry = ProviderRegistry(Settings(_env_file=None, state_dir=tmp_path))
+        registry.set_key("runware", "rw-key")
+        calls = {"n": 0}
+
+        def _check(self):
+            calls["n"] += 1
+            return KeyCheck(*results)
+
+        monkeypatch.setattr("app.providers.base.Provider.check_key", _check)
+        return registry, calls
+
+    def test_a_second_ask_is_answered_from_the_first(self, tmp_path, monkeypatch):
+        registry, calls = self._registry(tmp_path, monkeypatch, (True, "fine"))
+        assert registry.check_key("runware").ok is True
+        registry.check_key("runware")
+        assert calls["n"] == 1
+
+    def test_force_spends_another_one(self, tmp_path, monkeypatch):
+        registry, calls = self._registry(tmp_path, monkeypatch, (True, "fine"))
+        registry.check_key("runware")
+        registry.check_key("runware", force=True)
+        assert calls["n"] == 2
+
+    def test_a_new_key_is_never_answered_with_the_old_verdict(self, tmp_path, monkeypatch):
+        registry, calls = self._registry(tmp_path, monkeypatch, (False, "rejected"))
+        assert registry.check_key("runware").ok is False
+        registry.set_key("runware", "a-better-key")
+        registry.check_key("runware")
+        assert calls["n"] == 2, "the verdict on the replaced key was reused"
+
+    def test_clearing_the_key_forgets_the_verdict_too(self, tmp_path, monkeypatch):
+        registry, calls = self._registry(tmp_path, monkeypatch, (True, "fine"))
+        registry.check_key("runware")
+        registry.clear_key("runware")
+        registry.check_key("runware")
+        assert calls["n"] == 2

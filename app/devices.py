@@ -27,6 +27,32 @@ logger = logging.getLogger(__name__)
 
 Placement = Literal["split", "single", "offload", "none"]
 
+
+@dataclass(frozen=True)
+class PlacementChoice:
+    """Where the operator asked a model to go, when they asked at all.
+
+    The planner is good at this on a machine it understands, but it optimises
+    for one thing — fitting the largest checkpoint — and that is not always
+    what the operator wants. Pinning a model whole onto one card leaves the
+    other free.
+    """
+
+    mode: Literal["auto", "split", "single"] = "auto"
+    # Which card, for "single". None means the planner's own first choice.
+    device: int | None = None
+
+    @property
+    def is_auto(self) -> bool:
+        return self.mode == "auto"
+
+    def describe(self) -> str:
+        if self.mode == "single":
+            return f"pinned whole to GPU {self.device}" if self.device is not None else "pinned to one GPU"
+        if self.mode == "split":
+            return "split across two GPUs on request"
+        return "chosen automatically"
+
 # Approximate resident footprints, in GB, of the components we load.
 # Keyed by a substring of the repo id; the first match wins.
 _FOOTPRINTS: list[tuple[str, float, float]] = [
@@ -115,8 +141,14 @@ def plan_placement(
     max_pixels: int | None = None,
     transformer_vram_gb: float | None = None,
     text_encoder_vram_gb: float | None = None,
+    choice: PlacementChoice | None = None,
 ) -> DevicePlan:
-    """Choose where each component lives, honouring explicit overrides."""
+    """Choose where each component lives, honouring explicit overrides.
+
+    Three things can decide it, in descending authority: what the operator
+    asked for on this load (`choice`), what the environment pins, and failing
+    both, what fits.
+    """
     if transformer_vram_gb and text_encoder_vram_gb:
         # The caller already knows this checkpoint's footprints (the registry
         # does), so the substring table — and its warning — is not consulted.
@@ -127,6 +159,36 @@ def plan_placement(
         need_encoder = text_encoder_vram_gb or default_encoder_gb
 
     gpus = available_gpus()
+    override_reason = "placement set explicitly through the environment"
+
+    # ------------------------------------------------------ the operator asked
+    if choice is not None and not choice.is_auto and gpus:
+        indices = [index for index, _, _ in gpus]
+        if choice.mode == "single":
+            target = choice.device if choice.device is not None else indices[0]
+            if target not in indices:
+                raise ValueError(
+                    f"GPU {target} is not available; this machine offers "
+                    + ", ".join(str(index) for index in indices)
+                )
+            transformer_device = text_encoder_device = f"cuda:{target}"
+            name = next(gpu_name for index, gpu_name, _ in gpus if index == target)
+            override_reason = f"pinned whole to GPU {target} ({name}) on request"
+        elif choice.mode == "split":
+            if len(gpus) < 2:
+                raise ValueError(
+                    "splitting needs two GPUs and this machine has one; "
+                    "load it onto that card instead"
+                )
+            ranked_now = sorted(gpus, key=lambda entry: entry[2], reverse=True)
+            transformer_device = f"cuda:{ranked_now[0][0]}"
+            text_encoder_device = f"cuda:{ranked_now[1][0]}"
+            override_reason = (
+                f"split on request: transformer on GPU {ranked_now[0][0]}, "
+                f"text encoder on GPU {ranked_now[1][0]}"
+            )
+        if cpu_offload is None:
+            cpu_offload = False
 
     # ---------------------------------------------------------- no GPU at all
     if not gpus:
@@ -156,7 +218,7 @@ def plan_placement(
             text_encoder_device=resolved_encoder,
             cpu_offload=offload,
             max_pixels=max_pixels or pixel_budget(max(free, 3.0) if not offload else 6.0),
-            reason="placement set explicitly through the environment",
+            reason=override_reason,
         )
 
     # ------------------------------------------------- two or more usable GPUs

@@ -148,3 +148,79 @@ test.describe("reuse", () => {
     );
   });
 });
+
+test.describe("the model picker", () => {
+  test("one dialog holds every way to answer 'what makes this picture'", async ({ page }) => {
+    await unlock(page);
+    await page.getByRole("button", { name: /other model/i }).click();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+
+    // The three kinds of answer sit side by side rather than in three places.
+    const sources = dialog.getByRole("navigation", { name: /model sources/i });
+    await expect(sources.getByRole("button", { name: /on this machine/i })).toBeVisible();
+    await expect(sources.getByRole("button", { name: /hugging face/i })).toBeVisible();
+    await expect(sources.getByRole("button", { name: /openrouter/i })).toBeVisible();
+    await expect(sources.getByRole("button", { name: /runware/i })).toBeVisible();
+
+    // It opens on what is already here, and says which one is loaded.
+    await expect(dialog.getByText(/FLUX/).first()).toBeVisible();
+    await expect(dialog.getByText(/^loaded$/i)).toBeVisible();
+  });
+
+  test("a model that will not fit is listed with the reason, not hidden", async ({ page }) => {
+    await unlock(page);
+    await page.getByRole("button", { name: /other model/i }).click();
+    const dialog = page.getByRole("dialog");
+
+    await dialog.getByRole("textbox", { name: /search models/i }).fill("bf16");
+    // The entry stays, because "why can't I pick that?" deserves an answer.
+    await expect(dialog.getByText(/bf16/i).first()).toBeVisible();
+  });
+
+  test("the hub is searched, not browsed", async ({ page }) => {
+    await unlock(page);
+    await page.getByRole("button", { name: /other model/i }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: /hugging face/i }).click();
+
+    // Nothing is fetched, and nothing is downloaded, until you say what you want.
+    await expect(dialog.getByText(/nothing is downloaded until you load it/i)).toBeVisible();
+
+    await dialog.getByRole("textbox", { name: /search models/i }).fill("flux");
+    await expect(dialog.getByText(/black-forest-labs/).first()).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(dialog.getByText(/downloads/).first()).toBeVisible();
+  });
+
+  test("a provider with no key says so before you pick from it", async ({ page }) => {
+    await unlock(page);
+    await page.getByRole("button", { name: /other model/i }).click();
+    const dialog = page.getByRole("dialog");
+
+    // The claim is about the credential, and it is made where the choice is.
+    await expect(
+      dialog.getByRole("navigation", { name: /model sources/i }).getByText(/no key/i).first(),
+    ).toBeVisible();
+  });
+
+  test("picking a provider model puts it on the form", async ({ page }) => {
+    await unlock(page);
+    await page.getByRole("button", { name: /other model/i }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: /openrouter/i }).click();
+
+    const first = dialog.getByRole("listitem").first();
+    await expect(first).toBeVisible({ timeout: 30_000 });
+    const name = (await first.locator("span").first().textContent()) ?? "";
+    await first.getByRole("button", { name: /use it/i }).click();
+
+    // The dialog closes onto the choice it was opened to make.
+    await expect(dialog).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: new RegExp(name.slice(0, 12), "i") }),
+    ).toBeVisible();
+  });
+});

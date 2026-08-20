@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, Unauthorized } from "../lib/api";
+import type { Placement } from "../lib/api";
 import type { JobSummary } from "../lib/api";
 
 const noRetryOn401 = (count: number, error: unknown) =>
@@ -56,10 +57,55 @@ export function useCatalog(enabled = true) {
   });
 }
 
+/** GPUs, for the placement choice. They change slowly; the readings on them
+ *  do not, but /healthz is what watches those. */
+export function useGpus(enabled = true) {
+  return useQuery({
+    queryKey: ["gpus"],
+    queryFn: api.gpus,
+    enabled,
+    staleTime: 30_000,
+    retry: noRetryOn401,
+  });
+}
+
+/** The hub, searched only once the operator has typed something: an empty
+ *  query returns whatever is most downloaded, which is not an answer. */
+export function useHubSearch(query: string, enabled = true) {
+  return useQuery({
+    queryKey: ["hub-search", query],
+    queryFn: () => api.hubSearch(query),
+    enabled: enabled && query.trim().length > 1,
+    staleTime: 120_000,
+    retry: noRetryOn401,
+    placeholderData: (previous) => previous,
+  });
+}
+
+/** Whether a provider key actually works. Costs a request to the provider, so
+ *  it is asked once per provider per opening and cached on the server too. */
+export function useProviderCheck(provider: string, enabled = true) {
+  return useQuery({
+    queryKey: ["provider-check", provider],
+    queryFn: () => api.checkProviderKey(provider),
+    enabled,
+    staleTime: 120_000,
+    retry: false,
+  });
+}
+
 export function useLoadModel() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (model: string) => api.loadModel(model),
+    mutationFn: ({
+      model,
+      placement = "auto",
+      device,
+    }: {
+      model: string;
+      placement?: Placement;
+      device?: number;
+    }) => api.loadModel(model, placement, device),
     onSuccess: () => {
       client.invalidateQueries({ queryKey: ["health"] });
       client.invalidateQueries({ queryKey: ["catalog"] });

@@ -269,6 +269,20 @@ class RunwareProvider(Provider):
             catalog_total=0,
         )
 
+    def _check_key(self) -> None:
+        """The curated catalog answers without a credential, so it proves
+        nothing here. One search against the paid API does."""
+        self._run(
+            {
+                "taskType": "modelSearch",
+                "search": "flux",
+                "category": GENERATOR_CATEGORY,
+                "limit": 1,
+                "offset": 0,
+            },
+            timeout=30.0,
+        )
+
     def get_model(self, model_id: str) -> RemoteModel | None:
         """Resolve one AIR identifier.
 

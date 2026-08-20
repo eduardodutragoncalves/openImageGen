@@ -98,6 +98,21 @@ class OpenRouterProvider(Provider):
         models.sort(key=lambda model: model.id)
         return models
 
+    def _check_key(self) -> None:
+        """`/key` describes the credential itself, and costs no tokens."""
+        try:
+            response = httpx.get(
+                f"{self._base_url}/key",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=20.0,
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"could not reach OpenRouter: {exc}") from exc
+        if response.status_code in (401, 403):
+            raise ProviderError("OpenRouter rejected the key")
+        if response.status_code >= 400:
+            raise ProviderError(f"OpenRouter answered {response.status_code}")
+
     # ------------------------------------------------------------- generation
     def _post(self, payload: dict) -> dict:
         if not self.api_key:

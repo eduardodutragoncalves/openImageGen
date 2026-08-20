@@ -6,6 +6,7 @@ import { ASPECTS, fitToBudget, sizeForAspect } from "../lib/budget";
 import { megapixels } from "../lib/format";
 import { Diagonal, Field } from "./primitives";
 import { PromptModelDialog } from "./PromptModelDialog";
+import { ModelPicker } from "./ModelPicker";
 import { usePinned } from "../hooks/useApi";
 import { IconClose, IconImage, IconMinus, IconPlus, IconRefresh, IconUpload } from "./Icons";
 
@@ -49,6 +50,7 @@ export function Compose({
   const [seed, setSeed] = useState<string>("");
   const [count, setCount] = useState(1);
   const [upsample, setUpsample] = useState<"none" | "local" | "openrouter">("none");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -218,28 +220,37 @@ export function Compose({
       }}
     >
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-3">
-        {(pinned.data ?? []).length > 0 ? (
-          <Field
-            label="generate with"
-            hint={isRemote ? "billed by the provider" : "your GPUs"}
-          >
-            <div className="flex flex-wrap gap-[2px]">
+        <Field
+          label="generate with"
+          hint={isRemote ? "billed by the provider" : "your GPUs"}
+        >
+          <div className="flex flex-wrap gap-[2px]">
+            <TargetChip
+              active={!isRemote}
+              label={model?.label ?? "local model"}
+              onClick={() => setTarget("local")}
+            />
+            {(pinned.data ?? []).map((entry) => (
               <TargetChip
-                active={!isRemote}
-                label={model?.label ?? "local model"}
-                onClick={() => setTarget("local")}
+                key={entry.key}
+                active={target === entry.key}
+                label={entry.label}
+                onClick={() => setTarget(entry.key)}
               />
-              {(pinned.data ?? []).map((entry) => (
-                <TargetChip
-                  key={entry.key}
-                  active={target === entry.key}
-                  label={entry.label}
-                  onClick={() => setTarget(entry.key)}
-                />
-              ))}
-            </div>
-          </Field>
-        ) : null}
+            ))}
+            {/* Every other way to answer "what makes this picture" — a
+                checkpoint to load, one to download, a provider's catalog —
+                behind the one control that asks the question. */}
+            <button
+              type="button"
+              onClick={() => setPickerOpen(true)}
+              className="flex h-8 items-center gap-1 border border-dashed border-[var(--rule-strong)] px-3 text-[11px] text-[var(--ink-muted)] transition-colors hover:border-[var(--accent)] hover:text-[var(--ink)]"
+            >
+              <IconPlus size={12} />
+              <span>Other model</span>
+            </button>
+          </div>
+        </Field>
 
         <Field
           label="prompt"
@@ -506,6 +517,18 @@ export function Compose({
           selected={upsampleModel}
           onPick={setUpsampleModel}
           onClose={() => setPromptDialog(false)}
+        />
+      ) : null}
+
+      {pickerOpen ? (
+        <ModelPicker
+          onClose={() => setPickerOpen(false)}
+          // Pinning one is choosing it: the form switches to it rather than
+          // making you find it again in the row of chips.
+          onPicked={(key) => {
+            setTarget(key);
+            setPickerOpen(false);
+          }}
         />
       ) : null}
 

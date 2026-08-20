@@ -18,6 +18,9 @@ export type RemoteModel = S["RemoteModelInfo"];
 export type RemoteModelPage = S["RemoteModelPage"];
 export type PinnedModel = S["PinnedModelInfo"];
 export type JobState = S["JobState"];
+export type HubModel = S["HubModelInfo"];
+export type ProviderCheck = S["ProviderCheckResponse"];
+export type Placement = "auto" | "split" | "single";
 
 /** A 401. The studio answers this with the key gate, never with a broken page.
  *  It carries the server's own wording: on the sign-in screen the reason a key
@@ -98,11 +101,21 @@ export const api = {
   models: () => request<ModelInfo[]>("/v1/models"),
   catalog: () => request<CatalogEntry[]>("/v1/models/catalog"),
   modelStatus: () => request<ModelStatus>("/v1/models/status"),
-  loadModel: (model: string) =>
+  loadModel: (model: string, placement: Placement = "auto", device?: number) =>
     request<ModelStatus>("/v1/models/load", {
       method: "POST",
-      body: JSON.stringify({ model }),
+      body: JSON.stringify({ model, placement, device }),
     }),
+
+  gpus: () => request<GpuInfo[]>("/v1/gpus"),
+
+  hubSearch: (q: string, limit = 30) =>
+    request<HubModel[]>(
+      `/v1/models/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
+
+  checkProviderKey: (provider: string) =>
+    request<ProviderCheck>(`/v1/providers/${provider}/check`, { method: "POST" }),
 
   generate: (input: GenerationInput) =>
     request<JobSubmitted>("/v1/images/generations", {

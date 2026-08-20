@@ -20,7 +20,7 @@ import torch
 from PIL import Image
 
 from ..config import Settings
-from ..devices import available_gpus, plan_placement
+from ..devices import PlacementChoice, available_gpus, plan_placement
 from ..jobs import RejectedContent
 from ..models_registry import ModelSpec
 from ..safety import IntegrityFilter, NsfwFilter
@@ -88,7 +88,13 @@ class EngineResult:
 class BaseEngine(ABC):
     """Owns every model for one checkpoint and serializes access to the GPUs."""
 
-    def __init__(self, settings: Settings, spec: ModelSpec, precision: str | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        spec: ModelSpec,
+        precision: str | None = None,
+        choice: PlacementChoice | None = None,
+    ) -> None:
         self.settings = settings
         self.spec = spec
         self.precision = precision or choose_precision(spec)
@@ -103,6 +109,7 @@ class BaseEngine(ABC):
             # planner's substring table is only the fallback for unknown ones.
             transformer_vram_gb=settings.transformer_vram_gb or transformer_gb,
             text_encoder_vram_gb=settings.text_encoder_vram_gb or encoder_gb,
+            choice=choice,
         )
         logger.info(
             "placement=%s (%s): %s", self.plan.placement, self.precision, self.plan.reason

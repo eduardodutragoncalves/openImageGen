@@ -12,11 +12,12 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import Settings
-from .base import Provider, ProviderError, RemoteModel
+from .base import KeyCheck, Provider, ProviderError, RemoteModel
 from .openrouter import OpenRouterProvider
 from .runware import RunwareProvider
 
@@ -29,6 +30,9 @@ PROVIDER_CLASSES: dict[str, type[Provider]] = {
 
 # Where each provider's credential and endpoint live in Settings, for the
 # operators who would rather keep them in the environment than in the UI.
+# How long a key check is trusted before it is spent again.
+CHECK_TTL_S = 120.0
+
 ENV_SETTINGS: dict[str, tuple[str, str]] = {
     OpenRouterProvider.id: ("openrouter_api_key", "openrouter_base_url"),
     RunwareProvider.id: ("runware_api_key", "runware_base_url"),
@@ -68,6 +72,9 @@ class ProviderRegistry:
         self._path = settings.state_dir / "providers.json"
         self._lock = threading.Lock()
         self._state = self._read()
+        # A checked key stays checked for a couple of minutes. The picker asks
+        # every time it opens, and each answer costs a request to the provider.
+        self._checks: dict[str, tuple[float, KeyCheck]] = {}
 
     # ------------------------------------------------------------- persistence
     def _read(self) -> dict:
@@ -108,12 +115,14 @@ class ProviderRegistry:
             raise ProviderError(f"unknown provider {provider_id!r}")
         with self._lock:
             self._state.setdefault("keys", {})[provider_id] = key.strip()
+            self._checks.pop(provider_id, None)
             self._write()
         logger.info("stored an API key for %s", provider_id)
 
     def clear_key(self, provider_id: str) -> None:
         with self._lock:
             (self._state.get("keys") or {}).pop(provider_id, None)
+            self._checks.pop(provider_id, None)
             self._write()
         logger.info("cleared the stored API key for %s", provider_id)
 
@@ -128,6 +137,16 @@ class ProviderRegistry:
         if base_url:
             return cls(key, key_source=source, base_url=base_url)
         return cls(key, key_source=source)
+
+    def check_key(self, provider_id: str, force: bool = False) -> KeyCheck:
+        """Whether the credential actually works, remembered briefly."""
+        cached = self._checks.get(provider_id)
+        if cached and not force and time.monotonic() - cached[0] < CHECK_TTL_S:
+            return cached[1]
+        result = self.get(provider_id).check_key()
+        with self._lock:
+            self._checks[provider_id] = (time.monotonic(), result)
+        return result
 
     def list_providers(self) -> list[dict]:
         return [self.get(provider_id).info().as_dict() for provider_id in PROVIDER_CLASSES]

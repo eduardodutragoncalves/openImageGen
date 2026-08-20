@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass, field
 
 from .config import Settings
-from .devices import available_gpus, plan_placement
+from .devices import PlacementChoice, available_gpus, plan_placement
 from .engines import BaseEngine, create_engine
 from .engines.base import choose_precision, free_vram_gb, release_cuda_memory
 from .jobs import JobQueue
@@ -104,8 +104,13 @@ class ModelManager:
             daemon=True,
         ).start()
 
-    def switch(self, model_ref: str) -> ModelStatus:
-        """Begin replacing the loaded model. Returns immediately."""
+    def switch(self, model_ref: str, choice: PlacementChoice | None = None) -> ModelStatus:
+        """Begin replacing the loaded model. Returns immediately.
+
+        `choice` is where the operator asked it to go. Refused here rather than
+        inside the worker thread: "GPU 7 does not exist" is an answer to the
+        request, not a load failure to be discovered a minute later.
+        """
         spec = by_id(model_ref)
         if spec is None:
             if "/" not in model_ref:
@@ -123,10 +128,22 @@ class ModelManager:
         if self._engine is not None and self._engine.spec.id == spec.id and self._engine.loaded:
             raise ModelBusy(f"{spec.label} is already loaded")
 
+        if choice is not None and not choice.is_auto:
+            # Plan it now, with this checkpoint's real footprints, so an
+            # impossible placement is refused before the queue is drained.
+            precision = choose_precision(spec)
+            transformer_gb, encoder_gb = spec.footprints(precision)
+            plan_placement(
+                spec.repo_id,
+                transformer_vram_gb=transformer_gb,
+                text_encoder_vram_gb=encoder_gb,
+                choice=choice,
+            )
+
         previous = self._engine.spec if self._engine is not None else None
         threading.Thread(
             target=self._load_into_place,
-            args=(spec, previous),
+            args=(spec, previous, choice),
             name="model-switch",
             daemon=True,
         ).start()
@@ -141,7 +158,12 @@ class ModelManager:
         return self.status
 
     # ---------------------------------------------------------------- interns
-    def _load_into_place(self, spec: ModelSpec, previous: ModelSpec | None) -> None:
+    def _load_into_place(
+        self,
+        spec: ModelSpec,
+        previous: ModelSpec | None,
+        choice: PlacementChoice | None = None,
+    ) -> None:
         self._busy.set()
         switching = previous is not None
         self.status = ModelStatus(
@@ -162,9 +184,9 @@ class ModelManager:
                         "unloading " + (previous.label if previous else "model"), 0.05
                     )
                     self._teardown()
-                    self._require_headroom(spec)
+                    self._require_headroom(spec, choice)
 
-                self._activate(spec)
+                self._activate(spec, choice)
                 # Cleared before the ready status is published: a client that
                 # polls until "ready" must be able to switch again immediately,
                 # and the finally below makes this idempotent.
@@ -220,7 +242,7 @@ class ModelManager:
             "has to be restarted."
         )
 
-    def _require_headroom(self, spec: ModelSpec) -> None:
+    def _require_headroom(self, spec: ModelSpec, choice: PlacementChoice | None = None) -> None:
         """Refuse a load that cannot fit, instead of discovering it at 90%.
 
         An OOM part-way through leaves a half-built pipeline on the card, so
@@ -231,6 +253,21 @@ class ModelManager:
             return
         precision = choose_precision(spec)
         transformer_gb, encoder_gb = spec.footprints(precision)
+
+        # Pinned to one card, the question is whether *that* card holds the
+        # whole model. The freest GPU is not the one being asked.
+        if choice is not None and choice.mode == "single" and choice.device is not None:
+            if choice.device >= len(free):
+                raise RuntimeError(f"GPU {choice.device} is not available")
+            room = free[choice.device]
+            if room < transformer_gb + encoder_gb + 1.5:
+                raise RuntimeError(
+                    f"{spec.label} needs ~{transformer_gb + encoder_gb:.0f}GB to sit whole "
+                    f"on one card and GPU {choice.device} has {room:.1f}GB free. Split it "
+                    "across both cards instead, or pick a smaller checkpoint."
+                )
+            return
+
         largest = max(free)
         if largest < transformer_gb + 1.5:
             raise RuntimeError(
@@ -271,8 +308,8 @@ class ModelManager:
         self._ready.set()
         return True
 
-    def _activate(self, spec: ModelSpec) -> None:
-        engine = create_engine(self.settings, spec)
+    def _activate(self, spec: ModelSpec, choice: PlacementChoice | None = None) -> None:
+        engine = create_engine(self.settings, spec, choice)
         engine.on_phase = self._set_phase
         try:
             engine.load()

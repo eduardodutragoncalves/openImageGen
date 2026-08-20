@@ -128,7 +128,7 @@ export function Models({ health }: { health?: Health }) {
                   key={entry.id}
                   entry={entry}
                   busy={busy || load.isPending}
-                  onLoad={() => load.mutate(entry.id)}
+                  onLoad={() => load.mutate({ model: entry.id })}
                 />
               ))}
             </ul>
@@ -147,7 +147,7 @@ export function Models({ health }: { health?: Health }) {
             className="flex max-w-[560px] gap-[2px]"
             onSubmit={(event) => {
               event.preventDefault();
-              if (custom.trim()) load.mutate(custom.trim());
+              if (custom.trim()) load.mutate({ model: custom.trim() });
             }}
           >
             <input

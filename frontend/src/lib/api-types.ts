@@ -158,6 +158,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/providers/{provider_id}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Provider Key
+         * @description Spend one cheap call to find out whether the stored key actually works.
+         *
+         *     Held for a couple of minutes, because the model picker asks every time it
+         *     opens and every answer costs a request to the provider.
+         */
+        post: operations["check_provider_key_v1_providers__provider_id__check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/providers/{provider_id}/models": {
         parameters: {
             query?: never;
@@ -214,6 +237,27 @@ export interface paths {
         put?: never;
         /** Pin Model */
         post: operations["pin_model_v1_providers__provider_id__pin_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/models/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Hub Models
+         * @description Find something to load, without leaving the studio to go and copy a
+         *     repo id. Nothing is downloaded here — loading does that, and says so.
+         */
+        get: operations["search_hub_models_v1_models_search_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -611,6 +655,42 @@ export interface components {
             /** Detail */
             detail?: string | null;
         };
+        /**
+         * HubModelInfo
+         * @description A checkpoint on the Hugging Face hub, and what this machine knows of it.
+         */
+        HubModelInfo: {
+            /** Repo Id */
+            repo_id: string;
+            /** Downloads */
+            downloads: number;
+            /** Likes */
+            likes: number;
+            /** Pipeline Tag */
+            pipeline_tag?: string | null;
+            /**
+             * Gated
+             * @default false
+             */
+            gated: boolean;
+            /**
+             * Cached
+             * @default false
+             */
+            cached: boolean;
+            /**
+             * In Catalog
+             * @default false
+             */
+            in_catalog: boolean;
+            /** Catalog Id */
+            catalog_id?: string | null;
+            /**
+             * Family
+             * @default flux2
+             */
+            family: string;
+        };
         /** ImagePayload */
         ImagePayload: {
             /** B64 Json */
@@ -892,6 +972,18 @@ export interface components {
              * @description A catalog id (e.g. 'flux1-schnell') or a huggingface repo id.
              */
             model: string;
+            /**
+             * Placement
+             * @description Where to put it. 'auto' lets the planner fit it, which is what makes the largest checkpoints runnable at all. 'split' spreads the transformer and the text encoder across two cards. 'single' pins the whole model to one, leaving the other free.
+             * @default auto
+             * @enum {string}
+             */
+            placement: "auto" | "split" | "single";
+            /**
+             * Device
+             * @description Which GPU, for placement='single'. Omitted means the roomiest.
+             */
+            device?: number | null;
         };
         /**
          * OutputFormat
@@ -919,6 +1011,15 @@ export interface components {
             reads_images: boolean;
             /** Price Image */
             price_image?: string | null;
+        };
+        /** ProviderCheckResponse */
+        ProviderCheckResponse: {
+            /** Id */
+            id: string;
+            /** Ok */
+            ok: boolean;
+            /** Detail */
+            detail: string;
         };
         /** ProviderInfoResponse */
         ProviderInfoResponse: {
@@ -1360,6 +1461,44 @@ export interface operations {
             };
         };
     };
+    check_provider_key_v1_providers__provider_id__check_post: {
+        parameters: {
+            query?: {
+                /** @description Skip the cached answer */
+                force?: boolean;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path: {
+                provider_id: string;
+            };
+            cookie?: {
+                oig_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderCheckResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_provider_models_v1_providers__provider_id__models_get: {
         parameters: {
             query?: {
@@ -1495,6 +1634,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PinnedModelInfo"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_hub_models_v1_models_search_get: {
+        parameters: {
+            query?: {
+                /** @description Name or author, as typed on the hub */
+                q?: string;
+                limit?: number;
+                /** @description Keep only checkpoints that produce pictures */
+                only_images?: boolean;
+            };
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                oig_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HubModelInfo"][];
                 };
             };
             /** @description Validation Error */

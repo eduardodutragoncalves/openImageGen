@@ -90,6 +90,18 @@ class ModelPage:
     catalog_total: int = 0
 
 
+@dataclass(frozen=True)
+class KeyCheck:
+    """What happened when the credential was actually used.
+
+    "A key is set" and "a key works" are different claims, and only the second
+    one is worth showing an operator about to spend money.
+    """
+
+    ok: bool
+    detail: str
+
+
 class ProviderError(RuntimeError):
     """Anything the provider refused or could not answer."""
 
@@ -196,6 +208,26 @@ class Provider(ABC):
             models = [model for model in models if "text" in model.output_modalities]
         models = search(models, query)
         return ModelPage(models=models[:limit], total=len(models), catalog_total=catalog_total)
+
+    def check_key(self) -> KeyCheck:
+        """Spend one cheap authenticated call to find out if the key works."""
+        if not self.configured:
+            return KeyCheck(False, "no key set")
+        try:
+            self._check_key()
+        except ProviderError as exc:
+            return KeyCheck(False, str(exc))
+        except Exception as exc:  # noqa: BLE001 - a check must not raise
+            return KeyCheck(False, f"{type(exc).__name__}: {exc}")
+        return KeyCheck(True, f"{self.label} accepted the key")
+
+    def _check_key(self) -> None:
+        """The cheapest authenticated request this provider offers.
+
+        Raises ProviderError if the credential is not good. The default asks
+        for one model, which every provider can answer.
+        """
+        self.search_catalog(limit=1)
 
     def get_model(self, model_id: str) -> RemoteModel | None:
         """One model by its id, so pinning records the provider's own metadata

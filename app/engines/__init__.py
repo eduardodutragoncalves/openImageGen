@@ -12,15 +12,15 @@ from ..models_registry import ModelSpec
 from .base import BaseEngine, EngineResult, ProgressCallback
 
 
-def create_engine(settings: Settings, spec: ModelSpec) -> BaseEngine:
+def create_engine(settings: Settings, spec: ModelSpec, choice=None) -> BaseEngine:
     if spec.family == "flux2":
         from .flux2 import Flux2Engine
 
-        return Flux2Engine(settings, spec)
+        return Flux2Engine(settings, spec, choice=choice)
     if spec.family == "flux1":
         from .flux1 import Flux1Engine
 
-        return Flux1Engine(settings, spec)
+        return Flux1Engine(settings, spec, choice=choice)
     raise ValueError(
         f"no backend for model family {spec.family!r}; supported families are flux2 and flux1"
     )

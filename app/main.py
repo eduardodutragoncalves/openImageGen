@@ -27,7 +27,9 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import PROJECT_ROOT, Settings, get_settings
+from .devices import PlacementChoice
 from .engines import EngineResult
+from .hub import HubError, search as search_hub
 from .images import InvalidImage, decode_image, encode_image, fit_to_budget, mime_type
 from .jobs import Job, JobQueue, QueueFull
 from .model_manager import ModelBusy, ModelManager, UnknownModel
@@ -38,6 +40,7 @@ from .schemas import (
     GenerationRequest,
     GenerationResponse,
     GpuInfo,
+    HubModelInfo,
     HealthResponse,
     ImagePayload,
     JobImage,
@@ -52,6 +55,7 @@ from .schemas import (
     ModelSwitchRequest,
     PinnedModelInfo,
     PinRequest,
+    ProviderCheckResponse,
     ProviderInfoResponse,
     ProviderKeyRequest,
     RemoteModelInfo,
@@ -859,13 +863,19 @@ def load_model(
     """Replace the loaded model. Returns immediately; poll /v1/models/status."""
     manager = state.manager
     assert manager is not None
+    choice = PlacementChoice(mode=body.placement, device=body.device)
     try:
-        status = manager.switch(body.model)
+        status = manager.switch(body.model, choice)
     except UnknownModel as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ModelBusy as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    logger.info("model switch requested by %s: %s", owner, body.model)
+    except ValueError as exc:
+        # An impossible placement is a bad request, not a load that failed.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    logger.info(
+        "model switch requested by %s: %s (%s)", owner, body.model, choice.describe()
+    )
     return ModelStatusResponse(**status.as_dict())
 
 
@@ -911,6 +921,24 @@ def clear_provider_key(
 ) -> ProviderInfoResponse:
     _providers().clear_key(provider_id)
     return ProviderInfoResponse(**_providers().get(provider_id).info().as_dict())
+
+
+@app.post(
+    "/v1/providers/{provider_id}/check", response_model=ProviderCheckResponse, tags=["providers"]
+)
+def check_provider_key(
+    provider_id: str,
+    force: bool = Query(default=False, description="Skip the cached answer"),
+    owner: str = Depends(require_owner),
+) -> ProviderCheckResponse:
+    """Spend one cheap call to find out whether the stored key actually works.
+
+    Held for a couple of minutes, because the model picker asks every time it
+    opens and every answer costs a request to the provider.
+    """
+    _provider(provider_id)  # 404s an unknown one before anything is spent
+    result = _providers().check_key(provider_id, force=force)
+    return ProviderCheckResponse(id=provider_id, ok=result.ok, detail=result.detail)
 
 
 @app.get(
@@ -1011,6 +1039,23 @@ def unpin_model(
     if not _providers().unpin(key):
         raise HTTPException(status_code=404, detail=f"{key!r} is not pinned")
     return Response(status_code=204)
+
+
+@app.get("/v1/models/search", response_model=list[HubModelInfo], tags=["models"])
+def search_hub_models(
+    q: str = Query(default="", description="Name or author, as typed on the hub"),
+    limit: int = Query(default=30, ge=1, le=100),
+    only_images: bool = Query(
+        default=True, description="Keep only checkpoints that produce pictures"
+    ),
+    owner: str = Depends(require_owner),
+) -> list[HubModelInfo]:
+    """Find something to load, without leaving the studio to go and copy a
+    repo id. Nothing is downloaded here — loading does that, and says so."""
+    try:
+        return [HubModelInfo(**model.as_dict()) for model in search_hub(q, limit, only_images=only_images)]
+    except HubError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/v1/gpus", response_model=list[GpuInfo], tags=["ops"])
