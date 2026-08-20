@@ -90,6 +90,84 @@ export function useLiveJobs(enabled = true) {
   return { ...query, live };
 }
 
+// ------------------------------------------------------------------ providers
+export function useProviders(enabled = true) {
+  return useQuery({
+    queryKey: ["providers"],
+    queryFn: api.providers,
+    enabled,
+    retry: noRetryOn401,
+    staleTime: 30_000,
+  });
+}
+
+/** A provider's catalog. The image filter is the default because a model that
+ *  cannot output an image cannot generate one here. */
+export function useProviderModels(
+  provider: string,
+  params: { q?: string; kind?: "image" | "text" | "all"; limit?: number },
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["provider-models", provider, params],
+    queryFn: () => api.providerModels(provider, params),
+    enabled: enabled && Boolean(provider),
+    retry: noRetryOn401,
+    staleTime: 60_000,
+    placeholderData: (previous) => previous,
+  });
+}
+
+export function usePinned(enabled = true) {
+  return useQuery({
+    queryKey: ["pinned"],
+    queryFn: api.pinned,
+    enabled,
+    retry: noRetryOn401,
+    staleTime: 30_000,
+  });
+}
+
+export function useSetProviderKey() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ provider, key }: { provider: string; key: string }) =>
+      api.setProviderKey(provider, key),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function useClearProviderKey() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (provider: string) => api.clearProviderKey(provider),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function usePin() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ provider, modelId }: { provider: string; modelId: string }) =>
+      api.pin(provider, modelId),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["pinned"] });
+      client.invalidateQueries({ queryKey: ["provider-models"] });
+    },
+  });
+}
+
+export function useUnpin() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (key: string) => api.unpin(key),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["pinned"] });
+      client.invalidateQueries({ queryKey: ["provider-models"] });
+    },
+  });
+}
+
 export interface ArchiveFilters {
   search?: string;
   status?: string;

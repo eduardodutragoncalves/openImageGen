@@ -31,6 +31,7 @@ from .engines import EngineResult
 from .images import InvalidImage, decode_image, encode_image, fit_to_budget, mime_type
 from .jobs import Job, JobQueue, QueueFull
 from .model_manager import ModelBusy, ModelManager, UnknownModel
+from .providers import ProviderError, ProviderRegistry, search as search_models
 from .schemas import (
     CatalogEntry,
     EditRequest,
@@ -49,6 +50,12 @@ from .schemas import (
     ModelInfo,
     ModelStatusResponse,
     ModelSwitchRequest,
+    PinnedModelInfo,
+    PinRequest,
+    ProviderInfoResponse,
+    ProviderKeyRequest,
+    RemoteModelInfo,
+    RemoteModelPage,
     StorageInfo,
     UpsampleMode,
 )
@@ -74,6 +81,7 @@ class AppState:
         self.manager: ModelManager | None = None
         self.queue: JobQueue | None = None
         self.store: JobStore | None = None
+        self.providers: ProviderRegistry | None = None
 
 
 state = AppState()
@@ -123,30 +131,20 @@ def _handle_job(job: Job) -> GenerationResponse:
     manager = state.manager
     assert manager is not None
 
-    if not manager.wait_ready(timeout=WARMUP_TIMEOUT_S):
-        raise RuntimeError("models are still loading")
-    engine = manager.engine
-    if engine is None:
-        raise RuntimeError(manager.status.detail or "no model is loaded")
-
     payload = job.payload
     assert isinstance(payload, dict)
-
-    # The model may have been swapped between submission and execution; the
-    # archive should record what actually produced the image.
-    job.model_id = engine.spec.id
-    job.model_label = engine.spec.label
+    settings = get_settings()
+    remote = payload.get("remote_model")
 
     references = payload.get("references") or []
     if references and not payload.get("reference_urls"):
         # Saved before generation, not after: a job that fails or is refused is
         # exactly the one whose references the operator will want back.
-        settings_now = get_settings()
-        settings_now.output_dir.mkdir(parents=True, exist_ok=True)
+        settings.output_dir.mkdir(parents=True, exist_ok=True)
         saved = []
         for index, reference in enumerate(references):
             name = f"{job.id}_ref{index}.png"
-            reference.save(settings_now.output_dir / name)
+            reference.save(settings.output_dir / name)
             saved.append(
                 {
                     "url": f"/v1/files/{name}",
@@ -157,40 +155,74 @@ def _handle_job(job: Job) -> GenerationResponse:
             )
         payload["reference_urls"] = saved
 
-    started = time.perf_counter()
-    result: EngineResult = engine.generate(
-        prompt=payload["prompt"],
-        references=payload.get("references") or None,
-        width=payload.get("width"),
-        height=payload.get("height"),
-        num_steps=payload.get("num_steps"),
-        guidance=payload.get("guidance"),
-        seed=payload.get("seed"),
-        num_images=payload.get("num_images", 1),
-        upsample_mode=payload.get("upsample_mode", "none"),
-        progress=job.set_progress,
-    )
-    total = time.perf_counter() - started
+    # Prompt rewriting through OpenRouter happens here rather than inside the
+    # engine, so it works for a remote job too and picks up a key set through
+    # the Web models tab.
+    revised_prompt: str | None = None
+    prompt = payload["prompt"]
+    upsample_mode = payload.get("upsample_mode", "none")
+    if upsample_mode == "openrouter":
+        assert state.providers is not None
+        provider = state.providers.get("openrouter")
+        model = payload.get("upsample_model") or settings.openrouter_model
+        job.set_progress(0.0)
+        revised_prompt = provider.rewrite_prompt(
+            model=model, prompt=prompt, references=references or None
+        )
+        prompt = revised_prompt
+        upsample_mode = "none"
 
-    settings = get_settings()
+    started = time.perf_counter()
+    if remote:
+        images, seeds, width, height, timings = _generate_remote(job, payload, prompt)
+        model_id, model_label = remote["key"], remote["label"]
+    else:
+        if not manager.wait_ready(timeout=WARMUP_TIMEOUT_S):
+            raise RuntimeError("models are still loading")
+        engine = manager.engine
+        if engine is None:
+            raise RuntimeError(manager.status.detail or "no model is loaded")
+
+        # The model may have been swapped between submission and execution; the
+        # archive should record what actually produced the image.
+        model_id, model_label = engine.spec.id, engine.spec.label
+        result: EngineResult = engine.generate(
+            prompt=prompt,
+            references=references or None,
+            width=payload.get("width"),
+            height=payload.get("height"),
+            num_steps=payload.get("num_steps"),
+            guidance=payload.get("guidance"),
+            seed=payload.get("seed"),
+            num_images=payload.get("num_images", 1),
+            upsample_mode=upsample_mode,
+            progress=job.set_progress,
+        )
+        images, seeds = result.images, result.seeds
+        width, height, timings = result.width, result.height, result.timings
+        revised_prompt = result.revised_prompt or revised_prompt
+
+    total = time.perf_counter() - started
+    job.model_id, job.model_label = model_id, model_label
+
     response_format = payload.get("response_format", "b64_json")
     output_format = payload.get("output_format", "png")
 
-    images: list[ImagePayload] = []
+    payloads: list[ImagePayload] = []
     wrote_files = False
-    for image, seed in zip(result.images, result.seeds):
+    for image, seed in zip(images, seeds):
         if response_format == "url":
             settings.output_dir.mkdir(parents=True, exist_ok=True)
             name = f"{job.id}_{seed}.{output_format}"
             image.save(settings.output_dir / name)
             wrote_files = True
-            images.append(
+            payloads.append(
                 ImagePayload(
                     url=f"/v1/files/{name}", seed=seed, width=image.width, height=image.height
                 )
             )
         else:
-            images.append(
+            payloads.append(
                 ImagePayload(
                     b64_json=encode_image(image, output_format),
                     seed=seed,
@@ -210,12 +242,54 @@ def _handle_job(job: Job) -> GenerationResponse:
 
     return GenerationResponse(
         id=job.id,
-        model=engine.spec.id,
+        model=model_id,
         created=job.created,
         prompt=payload["prompt"],
-        revised_prompt=result.revised_prompt,
-        images=images,
-        timings={**result.timings, "total_s": round(total, 3)},
+        revised_prompt=revised_prompt,
+        images=payloads,
+        timings={**timings, "total_s": round(total, 3)},
+    )
+
+
+def _generate_remote(job: Job, payload: dict, prompt: str):
+    """Generate through a provider's API instead of the local GPUs.
+
+    There is no per-step progress to report: a remote call is one request per
+    image, so progress advances per image and the UI says so rather than
+    inventing a step count the provider never gave us.
+    """
+    assert state.providers is not None
+    remote = payload["remote_model"]
+    provider = state.providers.get(remote["provider"])
+    references = payload.get("references") or []
+    count = int(payload.get("num_images", 1) or 1)
+
+    t0 = time.perf_counter()
+    images = []
+    for index in range(count):
+        produced = provider.generate(
+            model=remote["model_id"],
+            prompt=prompt,
+            references=references or None,
+            width=payload.get("width"),
+            height=payload.get("height"),
+            num_images=1,
+        )
+        images.extend(produced)
+        job.set_progress((index + 1) / count)
+
+    if not images:
+        raise RuntimeError(f"{remote['label']} returned no image")
+    # The provider does not expose a seed; the request's own is recorded so the
+    # archive row stays shaped like every other one.
+    base_seed = payload.get("seed") or 0
+    seeds = [base_seed + index for index in range(len(images))]
+    return (
+        images,
+        seeds,
+        images[0].width,
+        images[0].height,
+        {"remote_s": round(time.perf_counter() - t0, 3)},
     )
 
 
@@ -297,8 +371,10 @@ def _request_from_payload(job: Job) -> JobRequest:
         seed=payload.get("seed"),
         num_images=int(payload.get("num_images", 1) or 1),
         upsample_mode=payload.get("upsample_mode"),
+        upsample_model=payload.get("upsample_model"),
         model_id=job.model_id,
         model_label=job.model_label,
+        remote=bool(payload.get("remote_model")),
         reference_count=len(payload.get("references") or []),
         references=_available(payload.get("reference_urls") or []),
     )
@@ -317,6 +393,7 @@ def _request_from_record(record: JobRecord) -> JobRequest:
         upsample_mode=record.upsample_mode,
         model_id=record.model_id,
         model_label=record.model_label,
+        remote=bool(record.model_id and ":" in record.model_id),
         reference_count=record.reference_count,
         references=_available(record.references_json),
     )
@@ -382,6 +459,7 @@ async def lifespan(app: FastAPI):
     if interrupted:
         logger.warning("%d job(s) were interrupted by the last restart", interrupted)
 
+    state.providers = ProviderRegistry(settings)
     state.manager = ModelManager(settings)
     state.queue = JobQueue(
         _handle_job,
@@ -474,14 +552,17 @@ def _submit(kind: str, payload: dict, owner: str) -> JobSubmitted:
     manager = state.manager
     assert manager is not None
 
+    remote = payload.get("remote_model")
     engine = manager.engine
     try:
         job = state.queue.submit(
             kind,
             payload,
             owner=owner,
-            model_id=engine.spec.id if engine else manager.spec.id,
-            model_label=engine.spec.label if engine else manager.spec.label,
+            model_id=remote["key"] if remote else (engine.spec.id if engine else manager.spec.id),
+            model_label=remote["label"]
+            if remote
+            else (engine.spec.label if engine else manager.spec.label),
         )
     except QueueFull as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -510,10 +591,46 @@ def _job_response(job: Job) -> JobStatusResponse:
     )
 
 
+def _resolve_remote(body: GenerationRequest | EditRequest) -> dict | None:
+    """A pinned provider model, when the request names one."""
+    choice = (body.model or "").strip()
+    if not choice or choice == "local":
+        return None
+    assert state.providers is not None
+    pinned = state.providers.find_pinned(choice)
+    if pinned is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"{choice!r} is not a pinned model. Pin it on the Web models tab first, "
+                "or omit `model` to use the checkpoint loaded on this machine."
+            ),
+        )
+    if not pinned.makes_images:
+        raise HTTPException(
+            status_code=422, detail=f"{pinned.label} does not produce images"
+        )
+    provider = state.providers.get(pinned.provider)
+    if not provider.configured:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{provider.label} has no API key. Add one on the Web models tab.",
+        )
+    return {
+        "provider": pinned.provider,
+        "model_id": pinned.model_id,
+        "label": pinned.label,
+        "key": pinned.key,
+        "reads_images": pinned.reads_images,
+    }
+
+
 def _build_payload(body: GenerationRequest | EditRequest, settings: Settings, references) -> dict:
     manager = state.manager
     engine = manager.engine if manager else None
     spec = engine.spec if engine else (manager.spec if manager else None)
+
+    remote = _resolve_remote(body)
 
     width = body.width or settings.default_width
     height = body.height or settings.default_height
@@ -525,6 +642,38 @@ def _build_payload(body: GenerationRequest | EditRequest, settings: Settings, re
                 detail=f"match_image_size={body.match_image_size} is out of range",
             )
         width, height = references[body.match_image_size].size
+
+    # A remote model is not bound by this machine's VRAM, and the local
+    # checkpoint's capabilities say nothing about it.
+    if remote is not None:
+        if references and not remote["reads_images"]:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{remote['label']} does not take reference images",
+            )
+        if body.upsample_prompt is UpsampleMode.local:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "local prompt upsampling runs on the loaded checkpoint and does not "
+                    "apply to a remote model; use 'openrouter' or 'none'"
+                ),
+            )
+        return {
+            "prompt": body.prompt,
+            "references": references,
+            "width": width,
+            "height": height,
+            "num_steps": None,
+            "guidance": None,
+            "seed": body.seed,
+            "num_images": body.num_images,
+            "upsample_mode": body.upsample_prompt.value,
+            "upsample_model": body.upsample_model,
+            "remote_model": remote,
+            "response_format": body.response_format.value,
+            "output_format": body.output_format.value,
+        }
 
     # The pixel cap comes from the resolved placement, not from a fixed
     # number: it depends on how much VRAM is left after the weights.
@@ -555,11 +704,16 @@ def _build_payload(body: GenerationRequest | EditRequest, settings: Settings, re
                     "local prompt upsampling is unavailable for it"
                 ),
             )
-    if body.upsample_prompt is UpsampleMode.openrouter and not settings.openrouter_api_key:
-        raise HTTPException(
-            status_code=400,
-            detail="upsample_prompt='openrouter' requires OIG_OPENROUTER_API_KEY",
-        )
+    if body.upsample_prompt is UpsampleMode.openrouter:
+        assert state.providers is not None
+        if not state.providers.get("openrouter").configured:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "prompt upsampling through OpenRouter needs an API key. Add one on "
+                    "the Web models tab, or set OIG_OPENROUTER_API_KEY."
+                ),
+            )
 
     steps = body.num_steps or (engine.default_steps if engine else settings.default_steps)
     guidance = body.guidance
@@ -576,6 +730,8 @@ def _build_payload(body: GenerationRequest | EditRequest, settings: Settings, re
         "seed": body.seed,
         "num_images": body.num_images,
         "upsample_mode": body.upsample_prompt.value,
+        "upsample_model": body.upsample_model,
+        "remote_model": None,
         "response_format": body.response_format.value,
         "output_format": body.output_format.value,
     }
@@ -713,6 +869,130 @@ def load_model(
     return ModelStatusResponse(**status.as_dict())
 
 
+# ------------------------------------------------------------------ providers
+def _providers() -> ProviderRegistry:
+    assert state.providers is not None
+    return state.providers
+
+
+@app.get("/v1/providers", response_model=list[ProviderInfoResponse], tags=["providers"])
+def list_providers(owner: str = Depends(require_owner)) -> list[ProviderInfoResponse]:
+    """Remote catalogs this server can reach. Keys are never returned."""
+    return [ProviderInfoResponse(**entry) for entry in _providers().list_providers()]
+
+
+@app.put("/v1/providers/{provider_id}/key", response_model=ProviderInfoResponse, tags=["providers"])
+def set_provider_key(
+    provider_id: str,
+    body: ProviderKeyRequest,
+    owner: str = Depends(require_owner),
+) -> ProviderInfoResponse:
+    """Store a provider credential server-side. It is never sent back."""
+    try:
+        _providers().set_key(provider_id, body.key)
+    except ProviderError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    logger.info("provider key for %s set by %s", provider_id, owner)
+    return ProviderInfoResponse(**_providers().get(provider_id).info().as_dict())
+
+
+@app.delete(
+    "/v1/providers/{provider_id}/key", response_model=ProviderInfoResponse, tags=["providers"]
+)
+def clear_provider_key(
+    provider_id: str, owner: str = Depends(require_owner)
+) -> ProviderInfoResponse:
+    _providers().clear_key(provider_id)
+    return ProviderInfoResponse(**_providers().get(provider_id).info().as_dict())
+
+
+@app.get(
+    "/v1/providers/{provider_id}/models", response_model=RemoteModelPage, tags=["providers"]
+)
+def list_provider_models(
+    provider_id: str,
+    q: str = Query(default="", description="Substring of the id, name or description"),
+    kind: str = Query(
+        default="image",
+        pattern="^(image|text|all)$",
+        description="'image' keeps only models that output images",
+    ),
+    limit: int = Query(default=60, ge=1, le=400),
+    include_routers: bool = Query(default=False),
+    owner: str = Depends(require_owner),
+) -> RemoteModelPage:
+    """Search a provider's catalog.
+
+    The default filter is the point of the whole tab: of the hundreds of models
+    OpenRouter lists, only the ones that actually output an image can generate
+    one here.
+    """
+    registry = _providers()
+    try:
+        models = registry.get(provider_id).list_models()
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    catalog_total = len(models)
+    if not include_routers:
+        models = [model for model in models if not model.is_router]
+    if kind == "image":
+        models = [model for model in models if model.makes_images]
+    elif kind == "text":
+        models = [model for model in models if "text" in model.output_modalities]
+
+    models = search_models(models, q)
+    pinned = {entry.key for entry in registry.pinned()}
+    page = models[:limit]
+    return RemoteModelPage(
+        models=[
+            RemoteModelInfo(**model.as_dict(), pinned=f"{provider_id}:{model.id}" in pinned)
+            for model in page
+        ],
+        total=len(models),
+        catalog_total=catalog_total,
+    )
+
+
+@app.get("/v1/providers/pinned", response_model=list[PinnedModelInfo], tags=["providers"])
+def list_pinned(owner: str = Depends(require_owner)) -> list[PinnedModelInfo]:
+    """The remote models kept on this platform, usable from the compose form."""
+    return [PinnedModelInfo(**entry.as_dict()) for entry in _providers().pinned()]
+
+
+@app.post(
+    "/v1/providers/{provider_id}/pin",
+    response_model=PinnedModelInfo,
+    status_code=201,
+    tags=["providers"],
+)
+def pin_model(
+    provider_id: str, body: PinRequest, owner: str = Depends(require_owner)
+) -> PinnedModelInfo:
+    registry = _providers()
+    try:
+        models = registry.get(provider_id).list_models()
+    except ProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    model = next((entry for entry in models if entry.id == body.model_id), None)
+    if model is None:
+        raise HTTPException(
+            status_code=404, detail=f"{provider_id} does not list {body.model_id!r}"
+        )
+    return PinnedModelInfo(**registry.pin(provider_id, model).as_dict())
+
+
+@app.delete("/v1/providers/pinned", status_code=204, tags=["providers"])
+def unpin_model(
+    key: str = Query(description="provider:model_id"),
+    owner: str = Depends(require_owner),
+) -> Response:
+    if not _providers().unpin(key):
+        raise HTTPException(status_code=404, detail=f"{key!r} is not pinned")
+    return Response(status_code=204)
+
+
 @app.get("/v1/gpus", response_model=list[GpuInfo], tags=["ops"])
 def list_gpus() -> list[GpuInfo]:
     return _gpu_report()
@@ -766,6 +1046,8 @@ async def create_edit_upload(
     seed: int | None = Form(default=None),
     num_images: int = Form(default=1),
     upsample_prompt: UpsampleMode = Form(default=UpsampleMode.none),
+    upsample_model: str | None = Form(default=None),
+    model: str | None = Form(default=None),
     match_image_size: int | None = Form(default=None),
     response_format: str = Form(default="b64_json"),
     owner: str = Depends(require_owner),
@@ -789,6 +1071,8 @@ async def create_edit_upload(
         seed=seed,
         num_images=num_images,
         upsample_prompt=upsample_prompt,
+        upsample_model=upsample_model or None,
+        model=model or None,
         match_image_size=match_image_size,
         response_format=response_format,
     )

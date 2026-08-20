@@ -5,17 +5,17 @@ colors:
   instrument-black: "#08090b"
   ground-sunk: "#050607"
   surface: "#0e1013"
-  ink: "#e9edf4"
-  ink-muted: "#97a0ae"
-  ink-faint: "#737d8b"
+  ink: "#f2f5fa"
+  ink-muted: "#b4bdca"
+  ink-faint: "#949dab"
   crouwel-blue: "#0057ff"
   accent-ink: "#6b9dff"
   caution-amber: "#ffb020"
   alarm-vermilion: "#ff4526"
-  rule: "rgb(233 237 244 / 0.16)"
-  rule-strong: "rgb(233 237 244 / 0.34)"
-  grid-major: "rgb(233 237 244 / 0.14)"
-  grid-fine: "rgb(233 237 244 / 0.055)"
+  rule: "rgb(242 245 250 / 0.22)"
+  rule-strong: "rgb(242 245 250 / 0.42)"
+  grid-major: "rgb(242 245 250 / 0.17)"
+  grid-fine: "rgb(242 245 250 / 0.07)"
 typography:
   display:
     fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
@@ -171,12 +171,11 @@ hues reserved for the two things the operator must never misread.
 - **Instrument Black** (#08090b): The page ground. Cool, near-neutral, and
   deliberately not blue-black slate.
 - **Ground Sunk** (#050607): Inset surfaces only — the inside of an input.
-- **Ink** (#e9edf4): Primary text and monumental numerals.
-- **Ink Muted** (#97a0ae): Secondary text, region labels, inactive controls.
-- **Ink Faint** (#737d8b, #5f6875 in the light register): Tertiary annotation,
-  placeholder text, disabled controls. Both values clear 4.5:1 on the surfaces
-  they are used on, including inside inputs.
-- **Rule** (rgb(233 237 244 / 0.16)): Every divider in the system.
+- **Ink** (#f2f5fa): Primary text and monumental numerals.
+- **Ink Muted** (#b4bdca): Secondary text, region labels, inactive controls.
+- **Ink Faint** (#949dab, #5f6875 in the light register): Tertiary annotation,
+  placeholder text, disabled controls. Both values clear 4.5:1 on the surfaces they are used on, including inside inputs. On the dark ground the ramp runs 18.2 : 10.5 : 7.3 against the page — three legible steps rather than one bright value and two grey ones.
+- **Rule** (rgb(242 245 250 / 0.22)): Every divider in the system.
 
 ### Named Rules
 
@@ -294,6 +293,13 @@ geometry.
 - **Archive cell** — a square thumbnail over a label strip carrying prompt,
   seed, dimensions and time. The strip is designed to be legible at grid
   density so a wall of cells can be scanned without hovering anything.
+- **Modal** — used only where the task genuinely needs protected focus, which
+  in this system means choosing one model out of hundreds. Square, hairline
+  edge in `rule-strong`, on the page ground and on the same 8px cell as
+  everything else. The surface behind it dims to `ground-sunk` at 85% and is
+  never blurred: this world has no glass, and a dialog is a region that has
+  taken the foreground, not a pane floating above one. Escape and a click on
+  the dimmed ground both close it.
 - **Icons** — drawn on a 16-unit grid, 1.5 stroke, butt caps, mitre joins,
   corners chamfered at 45° rather than rounded. No glyph or emoji ever stands
   in for an icon.

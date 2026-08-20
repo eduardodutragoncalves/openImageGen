@@ -19,7 +19,12 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
+    // The archive is cleared here rather than in globalSetup: Playwright starts
+    // the web server first, so deleting the state directory from globalSetup
+    // unlinks a SQLite file the server already has open, and every write after
+    // that fails as "readonly database".
     command: [
+      "rm -rf .e2e-state .e2e-output &&",
       "python -m uvicorn app.main:app",
       "--host 127.0.0.1",
       `--port ${PORT}`,

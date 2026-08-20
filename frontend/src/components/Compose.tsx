@@ -5,6 +5,8 @@ import type { Health, ModelInfo } from "../lib/api";
 import { ASPECTS, fitToBudget, sizeForAspect } from "../lib/budget";
 import { megapixels } from "../lib/format";
 import { Diagonal, Field } from "./primitives";
+import { PromptModelDialog } from "./PromptModelDialog";
+import { usePinned } from "../hooks/useApi";
 import { IconClose, IconImage, IconMinus, IconPlus, IconRefresh, IconUpload } from "./Icons";
 
 const MAX_REFERENCE_BYTES = 32 * 1024 * 1024;
@@ -20,6 +22,14 @@ export interface ComposePreset {
   seed?: number;
   width?: number;
   height?: number;
+  numSteps?: number;
+  guidance?: number;
+  numImages?: number;
+  upsampleMode?: string;
+  /** Reference images to re-attach, by URL. */
+  referenceUrls?: string[];
+  /** Changes on every "reuse", so pressing it twice loads it twice. */
+  stamp?: string;
 }
 
 export function Compose({
@@ -42,13 +52,28 @@ export function Compose({
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  // Where the image is made: the loaded checkpoint, or a pinned remote model.
+  const [target, setTarget] = useState<string>("local");
+  const [upsampleModel, setUpsampleModel] = useState<string | undefined>(undefined);
+  const [promptDialog, setPromptDialog] = useState(false);
+  const pinned = usePinned();
   const fileInput = useRef<HTMLInputElement>(null);
 
+  const remote = (pinned.data ?? []).find((entry) => entry.key === target);
+  const isRemote = Boolean(remote);
+
   const maxPixels = model?.max_pixels ?? 1024 * 1024;
-  const maxReferences = model?.max_reference_images ?? 0;
   const guidanceRange = model?.guidance_range ?? [0, 20];
   const stepRange = model?.step_range ?? [1, 100];
   const guidanceFixed = guidanceRange[0] === guidanceRange[1];
+  // A remote model is not bound by this machine's VRAM or by the local
+  // checkpoint's capabilities, and exposes no step or guidance control.
+  const maxReferences = isRemote
+    ? remote?.reads_images
+      ? 4
+      : 0
+    : (model?.max_reference_images ?? 0);
   const canEdit = maxReferences > 0;
 
   // Defaults follow the loaded model: switching to schnell must not leave a
@@ -66,16 +91,61 @@ export function Compose({
     if (!canEdit && files.length > 0) setFiles([]);
   }, [canEdit, files.length]);
 
-  // "Reuse these settings" from a job in the archive: the whole point of the
-  // archive is that a good run can be run again.
+  // "Reuse these settings" from a job in the archive. This has to restore the
+  // whole request, not just the prompt: the run worth repeating is usually the
+  // one that failed, and the operator is coming back to adjust one number.
   useEffect(() => {
     if (!preset) return;
     if (preset.prompt != null) setPrompt(preset.prompt);
-    if (preset.seed != null) setSeed(String(preset.seed));
+    setSeed(preset.seed != null ? String(preset.seed) : "");
     if (preset.width != null && preset.height != null) {
       setSize({ width: preset.width, height: preset.height });
     }
-  }, [preset]);
+    if (preset.numSteps != null) setSteps(preset.numSteps);
+    if (preset.guidance != null) setGuidance(preset.guidance);
+    if (preset.numImages != null) setCount(preset.numImages);
+    if (preset.upsampleMode === "local" || preset.upsampleMode === "openrouter") {
+      setUpsample(preset.upsampleMode);
+    } else if (preset.upsampleMode === "none") {
+      setUpsample("none");
+    }
+
+    const urls = preset.referenceUrls ?? [];
+    if (urls.length === 0) {
+      setFiles([]);
+      return;
+    }
+    // The references were saved on the server when the job ran, so an edit
+    // that was refused can be retried without hunting for the originals.
+    let cancelled = false;
+    setRestoring(true);
+    Promise.all(
+      urls.map(async (url, index) => {
+        const response = await fetch(url, { credentials: "same-origin" });
+        if (!response.ok) throw new Error(`reference ${index + 1} is gone`);
+        const blob = await response.blob();
+        const name = url.split("/").pop() ?? `reference-${index + 1}.png`;
+        return new File([blob], name, { type: blob.type || "image/png" });
+      }),
+    )
+      .then((restored) => {
+        if (!cancelled) setFiles(restored);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFiles([]);
+          setFileError(
+            "The reference images for that job are no longer on disk; attach them again.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRestoring(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [preset?.stamp]);
 
   const effective = useMemo(
     () => fitToBudget(size?.width ?? 1024, size?.height ?? 1024, maxPixels),
@@ -90,13 +160,15 @@ export function Compose({
     mutationFn: async () => {
       const shared = {
         prompt: prompt.trim(),
+        model: isRemote ? target : undefined,
         width: effective.width,
         height: effective.height,
-        num_steps: steps ?? undefined,
-        guidance: guidanceFixed ? undefined : (guidance ?? undefined),
+        num_steps: isRemote ? undefined : (steps ?? undefined),
+        guidance: isRemote || guidanceFixed ? undefined : (guidance ?? undefined),
         seed: seed.trim() === "" ? null : Number(seed),
         num_images: count,
         upsample_prompt: upsample,
+        upsample_model: upsample === "openrouter" ? upsampleModel : undefined,
       };
       return files.length > 0 ? api.edit({ ...shared, files }) : api.generate(shared);
     },
@@ -146,6 +218,29 @@ export function Compose({
       }}
     >
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-3">
+        {(pinned.data ?? []).length > 0 ? (
+          <Field
+            label="generate with"
+            hint={isRemote ? "billed by the provider" : "your GPUs"}
+          >
+            <div className="flex flex-wrap gap-[2px]">
+              <TargetChip
+                active={!isRemote}
+                label={model?.label ?? "local model"}
+                onClick={() => setTarget("local")}
+              />
+              {(pinned.data ?? []).map((entry) => (
+                <TargetChip
+                  key={entry.key}
+                  active={target === entry.key}
+                  label={entry.label}
+                  onClick={() => setTarget(entry.key)}
+                />
+              ))}
+            </div>
+          </Field>
+        ) : null}
+
         <Field
           label="prompt"
           htmlFor="prompt"
@@ -173,6 +268,7 @@ export function Compose({
           canEdit={canEdit}
           modelLabel={model?.label}
           dragging={dragging}
+          restoring={restoring}
           error={fileError}
           onPick={() => fileInput.current?.click()}
           onRemove={(index) => setFiles((current) => current.filter((_, i) => i !== index))}
@@ -208,6 +304,7 @@ export function Compose({
                 <button
                   key={aspect.label}
                   type="button"
+                  aria-pressed={active}
                   onClick={() => setSize({ width: candidate.width, height: candidate.height })}
                   className={`h-8 border px-3 text-[11px] font-semibold tracking-[0.08em] transition-colors ${
                     active
@@ -241,6 +338,19 @@ export function Compose({
           </div>
         </Field>
 
+        {isRemote ? (
+          <p className="border border-[var(--rule)] px-3 py-2 text-[11px] leading-relaxed text-[var(--ink-muted)]">
+            {remote?.label} runs on {remote?.provider}. Steps, guidance and the pixel cap
+            are the provider's to decide, so they are not shown.
+            {remote?.price_image ? (
+              <>
+                {" "}
+                It bills about{" "}
+                <span className="font-mono tabular">${remote.price_image}</span> per image.
+              </>
+            ) : null}
+          </p>
+        ) : (
         <div className="grid grid-cols-2 gap-4">
           <Field label="steps" hint={`${stepRange[0]}–${stepRange[1]}`}>
             <NumberBox
@@ -271,17 +381,18 @@ export function Compose({
             />
           </Field>
         </div>
+        )}
 
         <div className="grid grid-cols-2 gap-4">
-          <Field label="seed" hint="blank is random">
+          <Field label="seed" hint="blank is random" htmlFor="seed">
             <div className="flex items-center gap-[2px]">
               <input
+                id="seed"
                 value={seed}
                 onChange={(event) => setSeed(event.target.value.replace(/[^0-9]/g, ""))}
                 placeholder="random"
                 inputMode="numeric"
                 className="field h-8 flex-1 font-mono text-xs tabular"
-                aria-label="Seed"
               />
               <button
                 type="button"
@@ -301,6 +412,7 @@ export function Compose({
                 <button
                   key={value}
                   type="button"
+                  aria-pressed={count === value}
                   onClick={() => setCount(value)}
                   className={`h-8 flex-1 border text-[11px] font-semibold tabular transition-colors ${
                     count === value
@@ -318,23 +430,34 @@ export function Compose({
         <Field
           label="prompt upsampling"
           hint={
-            model && !model.supports_local_upsample
-              ? "local needs a vision-language encoder"
-              : undefined
+            isRemote
+              ? "local runs on the loaded checkpoint"
+              : model && !model.supports_local_upsample
+                ? "local needs a vision-language encoder"
+                : undefined
           }
         >
           <div className="flex gap-[2px]">
             {(["none", "local", "openrouter"] as const).map((mode) => {
-              const unavailable = mode === "local" && model && !model.supports_local_upsample;
+              const unavailable =
+                mode === "local" && (isRemote || (model && !model.supports_local_upsample));
               return (
                 <button
                   key={mode}
                   type="button"
+                  aria-pressed={upsample === mode}
                   disabled={Boolean(unavailable)}
-                  onClick={() => setUpsample(mode)}
+                  // Choosing openrouter opens the picker: which model rewrites
+                  // the prompt matters as much as the decision to rewrite it.
+                  onClick={() => {
+                    setUpsample(mode);
+                    if (mode === "openrouter") setPromptDialog(true);
+                  }}
                   title={
                     unavailable
-                      ? `${model?.label} has no vision-language text encoder`
+                      ? isRemote
+                        ? "Local upsampling uses the checkpoint on this machine"
+                        : `${model?.label} has no vision-language text encoder`
                       : undefined
                   }
                   className={`h-8 flex-1 border text-[10px] font-semibold uppercase tracking-[0.1em] transition-colors ${
@@ -350,6 +473,20 @@ export function Compose({
               );
             })}
           </div>
+          {upsample === "openrouter" ? (
+            <button
+              type="button"
+              onClick={() => setPromptDialog(true)}
+              className="mt-[6px] flex w-full items-center justify-between gap-2 border border-[var(--rule)] px-2 py-[6px] text-left text-[10px] transition-colors hover:border-[var(--accent)]"
+            >
+              <span className="truncate font-mono text-[var(--ink-muted)]">
+                {upsampleModel ?? "server default"}
+              </span>
+              <span className="shrink-0 uppercase tracking-[0.1em] text-[var(--accent-ink)]">
+                change
+              </span>
+            </button>
+          ) : null}
         </Field>
 
         {submit.isError ? (
@@ -364,15 +501,23 @@ export function Compose({
         ) : null}
       </div>
 
+      {promptDialog ? (
+        <PromptModelDialog
+          selected={upsampleModel}
+          onPick={setUpsampleModel}
+          onClose={() => setPromptDialog(false)}
+        />
+      ) : null}
+
       <div className="shrink-0 border-t border-[var(--rule)] p-3">
-        {warming || switching ? (
+        {(warming || switching) && !isRemote ? (
           <p className="mb-2 text-[11px] leading-relaxed text-[var(--ink-muted)]">
             {switching
               ? "The model is being replaced. Queue this now — it runs the moment the new weights are resident."
               : "The weights are still loading. Queue this now — it runs as soon as they land."}
           </p>
         ) : null}
-        {broken ? (
+        {broken && !isRemote ? (
           <p className="mb-2 text-[11px] leading-relaxed text-[var(--alarm-ink)]">
             {health?.detail ?? "No model is loaded."}
           </p>
@@ -383,6 +528,31 @@ export function Compose({
         </button>
       </div>
     </form>
+  );
+}
+
+function TargetChip({
+  active,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`h-8 max-w-full truncate border px-2 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
+        active
+          ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--ink-on-accent)]"
+          : "border-[var(--rule)] text-[var(--ink-muted)] hover:border-[var(--rule-strong)] hover:text-[var(--ink)]"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -449,6 +619,7 @@ function ReferenceField({
   canEdit,
   modelLabel,
   dragging,
+  restoring,
   error,
   onPick,
   onRemove,
@@ -460,6 +631,7 @@ function ReferenceField({
   canEdit: boolean;
   modelLabel?: string;
   dragging: boolean;
+  restoring: boolean;
   error: string | null;
   onPick: () => void;
   onRemove: (index: number) => void;
@@ -507,8 +679,9 @@ function ReferenceField({
           ) : null}
           {files.length === 0 ? (
             <p className="ml-1 text-[11px] leading-tight text-[var(--ink-muted)]">
-              Drop up to {maxReferences} image{maxReferences === 1 ? "" : "s"} to edit
-              instead of generate.
+              {restoring
+                ? "Bringing the references back…"
+                : `Drop up to ${maxReferences} image${maxReferences === 1 ? "" : "s"} to edit instead of generate.`}
             </p>
           ) : null}
         </div>

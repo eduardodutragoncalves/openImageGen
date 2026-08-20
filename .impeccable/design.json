@@ -16,8 +16,8 @@
         "purpose": "Inset surfaces only: the inside of an input.",
         "lightRegister": "#e9edf2"
       },
-      "ink": { "role": "neutral", "displayName": "Ink", "lightRegister": "#111111" },
-      "ink-muted": { "role": "neutral", "displayName": "Ink Muted", "lightRegister": "#4a5260" },
+      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "#f2f5fa", "lightRegister": "#111111" },
+      "ink-muted": { "role": "neutral", "displayName": "Ink Muted", "canonical": "#b4bdca", "lightRegister": "#4a5260" },
       "ink-faint": {
         "role": "neutral",
         "displayName": "Ink Faint",

@@ -38,6 +38,13 @@ class GenerationParams(BaseModel):
     seed: int | None = Field(default=None, ge=0, le=2**31 - 1)
     num_images: int = Field(default=1, ge=1, le=4)
     upsample_prompt: UpsampleMode = UpsampleMode.none
+    # Which OpenRouter model rewrites the prompt. Unset falls back to
+    # OIG_OPENROUTER_MODEL.
+    upsample_model: str | None = None
+    # Where the image is made. None or "local" uses the loaded checkpoint on
+    # this machine; a pinned key like "openrouter:google/gemini-3-pro-image"
+    # makes it through that provider instead.
+    model: str | None = None
     response_format: ResponseFormat = ResponseFormat.b64_json
     output_format: OutputFormat = OutputFormat.png
 
@@ -176,8 +183,10 @@ class JobRequest(BaseModel):
     seed: int | None = None
     num_images: int = 1
     upsample_mode: str | None = None
+    upsample_model: str | None = None
     model_id: str | None = None
     model_label: str | None = None
+    remote: bool = False
     reference_count: int = 0
     # The reference images this job was given, kept so an edit can be retried
     # without hunting for the originals again.
@@ -281,6 +290,64 @@ class ModelSwitchRequest(BaseModel):
         min_length=1,
         description="A catalog id (e.g. 'flux1-schnell') or a huggingface repo id.",
     )
+
+
+class ProviderInfoResponse(BaseModel):
+    id: str
+    label: str
+    summary: str
+    docs_url: str
+    key_url: str
+    supports_generation: bool
+    # True when a key is available, from the environment or set here. The key
+    # itself is never returned.
+    configured: bool
+    key_source: Literal["none", "env", "stored"]
+    catalog_is_public: bool
+
+
+class RemoteModelInfo(BaseModel):
+    id: str
+    name: str
+    description: str
+    input_modalities: list[str]
+    output_modalities: list[str]
+    context_length: int | None = None
+    price_image: str | None = None
+    price_prompt: str | None = None
+    is_router: bool
+    makes_images: bool
+    reads_images: bool
+    pinned: bool = False
+
+
+class RemoteModelPage(BaseModel):
+    models: list[RemoteModelInfo]
+    total: int
+    # How many the provider offers before the modality filter, so the UI can
+    # say "11 image generators out of 414" rather than implying that is all
+    # there is.
+    catalog_total: int
+
+
+class PinnedModelInfo(BaseModel):
+    key: str
+    provider: str
+    model_id: str
+    label: str
+    makes_images: bool
+    reads_images: bool
+    price_image: str | None = None
+
+
+class ProviderKeyRequest(BaseModel):
+    key: str = Field(min_length=1)
+
+
+class PinRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    model_id: str = Field(min_length=1)
 
 
 class GpuInfo(BaseModel):

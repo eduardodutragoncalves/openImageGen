@@ -130,6 +130,13 @@ redirects to `/docs` when no studio has been built.
 | `GET` | `/v1/models/catalog` | Every known model, runnable here or not, with the reason |
 | `POST` | `/v1/models/load` | Replace the loaded model; returns `202` |
 | `GET` | `/v1/models/status` | Where a load or swap has got to |
+| `GET` | `/v1/providers` | Remote catalogs this server can reach, and whether each has a key |
+| `PUT` | `/v1/providers/{id}/key` | Store a provider credential server-side |
+| `DELETE` | `/v1/providers/{id}/key` | Forget it |
+| `GET` | `/v1/providers/{id}/models` | Search a provider's catalog (`?q=`, `?kind=image\|text\|all`, `?limit=`) |
+| `POST` | `/v1/providers/{id}/pin` | Keep a remote model as a generation target |
+| `GET` | `/v1/providers/pinned` | The pinned ones, usable as `model` on a generation |
+| `DELETE` | `/v1/providers/pinned` | Unpin (`?key=provider:model_id`) |
 | `GET` | `/v1/gpus` | VRAM usage per card and each one's role |
 | `GET` | `/v1/auth` | Whether this caller is authenticated, and as whom |
 | `POST` | `/v1/auth` | Exchange a key for a session cookie |
@@ -249,6 +256,8 @@ reference at ~1MP automatically.
 | `seed` | random | extra images use `seed+1`, `seed+2`, … |
 | `num_images` | 1 | generated sequentially (memory) |
 | `upsample_prompt` | `none` | `local` (resident text encoder) or `openrouter` |
+| `upsample_model` | `OIG_OPENROUTER_MODEL` | Which OpenRouter model rewrites the prompt |
+| `model` | the loaded checkpoint | Or a pinned remote model, as `provider:model_id` |
 | `response_format` | `b64_json` | or `url` (saved under `output/`) |
 | `output_format` | `png` | `png`, `jpeg`, `webp` |
 
@@ -324,6 +333,71 @@ guessed from the name and its footprint assumed, so supply the sizes with
 
 ---
 
+## Web models
+
+Not every model has to live on your GPUs. The **Web models** tab of the studio
+reaches a provider's catalog over HTTP, and a model you pin there becomes a
+target in the compose form next to the resident checkpoint — no VRAM, no swap,
+billed by the provider instead of by your electricity.
+
+OpenRouter is the provider implemented today. Its catalog is public, so the tab
+is browsable before any key is set; generating needs one.
+
+**The filter is the point.** OpenRouter lists hundreds of models and only a
+handful of them can emit an image. The default view is that handful, taken from
+each model's declared output modality rather than from its name, and the page
+says how many it dropped:
+
+```bash
+curl -s "localhost:8000/v1/providers/openrouter/models?kind=image" \
+  -H "X-API-Key: $KEY" | jq '{shown: (.models|length), matched: .total, catalog: .catalog_total}'
+```
+
+`kind=text` widens it to text models — that set is what a prompt rewriter is
+chosen from — and `kind=all` drops the filter entirely. Meta-routers such as
+`openrouter/auto` are excluded unless `include_routers=true`, since which model
+answers is decided per request.
+
+### Pinning, and generating
+
+```bash
+# keep one
+curl -s -X POST localhost:8000/v1/providers/openrouter/pin \
+  -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+  -d '{"model_id": "google/gemini-3-pro-image"}'
+
+# then it is just another value of `model`
+curl -s -X POST localhost:8000/v1/images/generations \
+  -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+  -d '{"prompt": "a lighthouse in fog", "model": "openrouter:google/gemini-3-pro-image"}'
+```
+
+Remote jobs go through the same queue, the same archive and the same `/j/<id>`
+page as local ones; the model recorded on the job is the one that actually ran
+it. What differs is what the provider will honour: steps, guidance and the
+pixel budget are this machine's concerns and are not sent, progress advances
+per image rather than per step because there are no steps to report, and a
+reference image is refused up front if the pinned model does not read images.
+`upsample_prompt="local"` is refused too — it runs on the resident text
+encoder, which has nothing to do with a remote model. Use `"openrouter"`.
+
+### The key
+
+The credential can come from `OIG_OPENROUTER_API_KEY` or be set in the tab. A
+key set in the tab wins, is written `0600` to `providers.json` under
+`OIG_STATE_DIR`, and survives a restart without ever entering the repository.
+
+**It is never sent back.** `GET /v1/providers` answers `configured: true` and
+where the key came from — never the key itself, not even masked.
+
+```bash
+curl -s -X PUT localhost:8000/v1/providers/openrouter/key \
+  -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+  -d '{"key": "sk-or-..."}'
+```
+
+---
+
 ## The studio
 
 A single-page app built with Vite and served by this same process from
@@ -338,6 +412,9 @@ A single-page app built with Vite and served by this same process from
   every result is addressable at `/j/<id>`, and `OIG_OUTPUT_MAX_GB` keeps the
   files from filling the disk. A job whose file retention reclaimed still shows
   its prompt, seed and settings.
+- **Local and remote in one form.** A model pinned on the Web models tab is a
+  choice next to the resident checkpoint, and the form shows only the controls
+  that target will actually honour.
 - **History is scoped per API key**, so on a shared server each person sees
   their own work. Give each person their own entry in `OIG_API_KEYS`.
 
@@ -360,7 +437,7 @@ cd frontend && npm run schema
 ## Tests
 
 ```bash
-pytest tests/                      # 31 checks, no GPU: runs under OIG_DRY_RUN
+pytest tests/                      # 46 checks, no GPU: runs under OIG_DRY_RUN
 cd frontend && npm run test:e2e    # the critical path in a real browser
 ```
 
@@ -449,6 +526,10 @@ app/
   store.py           SQLite job archive and output retention
   safety.py          NSFW + integrity filter
   upsampler.py       local and OpenRouter prompt upsampling
+  providers/
+    base.py          the Provider contract, catalog filtering, search
+    openrouter.py    catalog, generation and prompt rewriting over HTTP
+    registry.py      credentials (0600, server-side) and pinned models
   images.py          base64/PIL helpers, pixel budget
   main.py            FastAPI routes, auth, SPA hosting
   static/            the built studio (produced by frontend/)

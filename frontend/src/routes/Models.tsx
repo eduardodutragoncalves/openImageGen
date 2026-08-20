@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { WebModels } from "./WebModels";
 import type { CatalogEntry, Health } from "../lib/api";
 import { ApiError } from "../lib/api";
 import { useCatalog, useLoadModel } from "../hooks/useApi";
@@ -14,10 +15,13 @@ const FAMILY_LABEL: Record<string, string> = { flux2: "FLUX.2", flux1: "FLUX.1" 
  * cannot hold are shown demoted with the reason rather than filtered away —
  * "why can't I pick that?" is a question the page should answer, not dodge.
  */
+type Tab = "local" | "web";
+
 export function Models({ health }: { health?: Health }) {
   const catalog = useCatalog();
   const load = useLoadModel();
   const [custom, setCustom] = useState("");
+  const [tab, setTab] = useState<Tab>("local");
 
   const busy = health?.model.state === "switching" || health?.model.state === "loading";
   const entries = catalog.data ?? [];
@@ -40,6 +44,40 @@ export function Models({ health }: { health?: Health }) {
     <div className="min-h-0 flex-1 overflow-y-auto">
       {busy ? <SwitchBanner health={health!} /> : null}
 
+      <nav
+        className="flex items-stretch border-b border-[var(--rule)]"
+        aria-label="Model sources"
+      >
+        {(
+          [
+            ["local", "On this machine"],
+            ["web", "Web models"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setTab(value)}
+            aria-pressed={tab === value}
+            className={`relative flex h-11 items-center border-r border-[var(--rule)] px-5 text-[11px] font-semibold uppercase tracking-[0.14em] transition-colors ${
+              tab === value
+                ? "text-[var(--ink-on-accent)]"
+                : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
+            }`}
+          >
+            {tab === value ? (
+              <span
+                aria-hidden
+                className="absolute inset-0 bg-[var(--accent)]"
+                style={{ clipPath: "polygon(12px 0, 100% 0, calc(100% - 12px) 100%, 0 100%)" }}
+              />
+            ) : null}
+            <span className="relative">{label}</span>
+          </button>
+        ))}
+      </nav>
+
+      {tab === "web" ? <WebModels /> : (
       <div className="mx-auto max-w-[1400px] px-4 py-6">
         <div className="mb-6 flex items-end justify-between gap-8 border-b border-[var(--rule)] pb-4">
           <div>
@@ -126,6 +164,7 @@ export function Models({ health }: { health?: Health }) {
           </form>
         </section>
       </div>
+      )}
     </div>
   );
 }
