@@ -236,6 +236,10 @@ app/static/
 # Runtime logs, written by scripts/start.sh
 logs/
 
+# Working state for the README screenshots (the images themselves are
+# committed under docs/screens/)
+.readme-shots/
+
 # Impeccable working directories
 .impeccable/review/
 frontend/uishot.mjs

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import re
 import threading
@@ -166,6 +167,8 @@ class RunwareProvider(Provider):
                 "key on the Web models tab or set OIG_RUNWARE_API_KEY."
             )
         body = [{"taskUUID": str(uuid.uuid4()), **task}]
+        what = str(task.get("taskType") or "a request")
+        started = time.perf_counter()
         try:
             response = httpx.post(
                 self._base_url,
@@ -177,20 +180,39 @@ class RunwareProvider(Provider):
                 timeout=timeout or self._timeout,
             )
         except httpx.HTTPError as exc:
-            raise ProviderError(f"could not reach Runware: {exc}") from exc
+            logger.warning("runware: %s could not be sent: %s", what, exc)
+            raise ProviderError(f"could not reach Runware: {exc}", retryable=True) from exc
 
+        elapsed = time.perf_counter() - started
         try:
             payload = response.json()
         except ValueError:
+            logger.warning(
+                "runware: %s answered HTTP %s with non-JSON: %s",
+                what, response.status_code, response.text[:400],
+            )
             raise ProviderError(
                 f"Runware answered {response.status_code} with something that was not JSON"
             ) from None
 
         errors = payload.get("errors") or []
         if errors:
-            raise ProviderError(self._explain(errors[0], response.status_code))
+            # Runware's own error object carries more than the sentence shown
+            # to the operator, and the rest of it is what a bug report needs.
+            logger.warning(
+                "runware: %s failed after %.1fs — HTTP %s: %s",
+                what, elapsed, response.status_code, json.dumps(errors[0], ensure_ascii=False)[:600],
+            )
+            raise ProviderError(
+                self._explain(errors[0], response.status_code),
+                retryable=str(errors[0].get("code") or "")
+                in {"timeoutProvider", "providerRateLimitExceeded"},
+            )
         if response.status_code >= 400:
+            logger.warning("runware: %s answered HTTP %s", what, response.status_code)
             raise ProviderError(f"Runware refused the request ({response.status_code})")
+
+        logger.info("runware: %s in %.1fs", what, elapsed)
         return payload.get("data") or []
 
     @staticmethod
@@ -202,6 +224,8 @@ class RunwareProvider(Provider):
             return "Runware rejected the API key."
         if code == "insufficientCredits" or status == 402:
             return "Runware reports no credit left on this account."
+        if code in {"timeoutProvider", "providerRateLimitExceeded"}:
+            return f"Runware's upstream is busy ({code}); it is worth trying again."
         if error.get("parameter") == "search":
             # The docs mark `search` as required and the API accepts a blank
             # one anyway. Kept for the day that changes, and phrased as what to

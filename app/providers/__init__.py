@@ -1,6 +1,15 @@
 """Remote model providers."""
 
-from .base import KeyCheck, ModelPage, Provider, ProviderError, ProviderInfo, RemoteModel, search
+from .base import (
+    KeyCheck,
+    ModelPage,
+    Provider,
+    ProviderError,
+    ProviderInfo,
+    RemoteModel,
+    search,
+    with_retries,
+)
 from .openrouter import OpenRouterProvider
 from .registry import PROVIDER_CLASSES, PinnedModel, ProviderRegistry
 from .runware import RunwareProvider
@@ -18,4 +27,5 @@ __all__ = [
     "RemoteModel",
     "RunwareProvider",
     "search",
+    "with_retries",
 ]

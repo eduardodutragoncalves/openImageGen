@@ -797,3 +797,199 @@ class TestTheRealPayloadShape:
         assert model.description.startswith("sd1x · photorealistic")
         assert model.cover_image.startswith("https://mim.runware.ai/")
         assert model.creator == ""
+
+
+class TestDiagnosingAFailure:
+    """A real job failed with "OpenRouter refused the request: Provider
+    returned error", which says nothing anyone can act on. These pin down the
+    three reasons it said so little."""
+
+    def _openrouter(self, monkeypatch, payload, status=200):
+        from app.providers.openrouter import OpenRouterProvider
+
+        recorder = _Recorder(payload, status)
+        monkeypatch.setattr("httpx.post", recorder)
+        return OpenRouterProvider(api_key="sk-or-x"), recorder
+
+    def test_the_upstream_reason_is_carried_out_of_the_metadata(self, monkeypatch):
+        """OpenRouter's own message is often just "Provider returned error";
+        what actually happened is one level down."""
+        from app.providers import ProviderError
+
+        provider, _ = self._openrouter(
+            monkeypatch,
+            {
+                "error": {
+                    "code": 400,
+                    "message": "Provider returned error",
+                    "metadata": {
+                        "provider_name": "Google AI Studio",
+                        "raw": {"error": {"status": "INVALID_ARGUMENT", "message": "unsupported"}},
+                    },
+                }
+            },
+            status=400,
+        )
+        with pytest.raises(ProviderError) as caught:
+            provider.generate(model="google/gemini-3.1-flash-image", prompt="x")
+
+        said = str(caught.value)
+        assert "Provider returned error" in said
+        assert "Google AI Studio" in said
+        assert "INVALID_ARGUMENT" in said
+
+    def test_an_error_arriving_with_a_200_is_still_an_error(self, monkeypatch):
+        """The HTTP call succeeded and the inference did not."""
+        from app.providers import ProviderError
+
+        provider, _ = self._openrouter(
+            monkeypatch, {"error": {"message": "rate limited upstream"}}, status=200
+        )
+        with pytest.raises(ProviderError, match="rate limited upstream"):
+            provider.generate(model="google/gemini-3.1-flash-image", prompt="x")
+
+    def test_the_failing_call_is_named(self, monkeypatch):
+        """One job can make two calls to OpenRouter — rewriting the prompt and
+        then generating — so "the request" failed is not an answer."""
+        from app.providers import ProviderError
+
+        provider, _ = self._openrouter(monkeypatch, {"error": {"message": "no"}}, status=400)
+        with pytest.raises(ProviderError, match="a generation"):
+            provider.generate(model="m", prompt="x")
+        with pytest.raises(ProviderError, match="a prompt rewrite"):
+            provider.rewrite_prompt(model="m", prompt="x")
+
+    def test_a_model_that_refuses_in_words_is_quoted(self, monkeypatch):
+        """A model that will not draw something usually says why, in the text
+        part of a perfectly successful reply."""
+        from app.providers import ProviderError
+
+        provider, _ = self._openrouter(
+            monkeypatch,
+            {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "content": "I can't create images of real football clubs.",
+                            "images": [],
+                        },
+                    }
+                ]
+            },
+        )
+        with pytest.raises(ProviderError) as caught:
+            provider.generate(model="google/gemini-3.1-flash-image", prompt="x")
+        assert "real football clubs" in str(caught.value)
+
+    def test_every_call_is_logged_with_the_model_and_the_outcome(self, monkeypatch, caplog):
+        import logging
+
+        provider, _ = self._openrouter(monkeypatch, {"error": {"message": "nope"}}, status=400)
+        with caplog.at_level(logging.WARNING, logger="app.providers.openrouter"):
+            with pytest.raises(Exception):
+                provider.generate(model="google/gemini-3.1-flash-image", prompt="x")
+
+        logged = caplog.text
+        assert "google/gemini-3.1-flash-image" in logged
+        assert "a generation" in logged
+        assert "HTTP 400" in logged
+
+    def test_a_runware_failure_logs_the_whole_error_object(self, monkeypatch, caplog):
+        import logging
+
+        provider, _ = _paid(
+            monkeypatch,
+            {
+                "errors": [
+                    {
+                        "code": "invalidModel",
+                        "message": "unknown model",
+                        "parameter": "model",
+                        "taskType": "imageInference",
+                    }
+                ]
+            },
+            status=400,
+        )
+        with caplog.at_level(logging.WARNING, logger="app.providers.runware"):
+            with pytest.raises(Exception):
+                provider.generate(model="nobody:nothing@0", prompt="x")
+
+        # The sentence shown to the operator is short on purpose; the log is
+        # what a bug report is written from.
+        assert "invalidModel" in caplog.text
+        assert "imageInference" in caplog.text
+
+
+class TestRetrying:
+    """A real job died on an upstream hiccup that cleared by itself: the same
+    request succeeded a minute later. Retrying that is worth it — retrying a
+    refusal only spends the failure twice."""
+
+    def _flaky(self, failures, retryable=True):
+        from app.providers import ProviderError
+
+        calls = {"n": 0}
+
+        def call():
+            calls["n"] += 1
+            if calls["n"] <= failures:
+                raise ProviderError("Provider returned error", retryable=retryable)
+            return "an image"
+
+        return call, calls
+
+    def test_a_transient_failure_is_tried_again(self):
+        from app.providers import with_retries
+
+        call, calls = self._flaky(2)
+        assert with_retries(call, sleep=lambda _: None) == "an image"
+        assert calls["n"] == 3
+
+    def test_a_refusal_is_not(self):
+        from app.providers import ProviderError, with_retries
+
+        call, calls = self._flaky(2, retryable=False)
+        with pytest.raises(ProviderError):
+            with_retries(call, sleep=lambda _: None)
+        # Once. A rejected key or a refused prompt fails the same way twice.
+        assert calls["n"] == 1
+
+    def test_it_gives_up_and_reports_the_last_failure(self):
+        from app.providers import ProviderError, with_retries
+
+        call, calls = self._flaky(99)
+        with pytest.raises(ProviderError, match="Provider returned error"):
+            with_retries(call, attempts=3, sleep=lambda _: None)
+        assert calls["n"] == 3
+
+    def test_the_wait_grows(self):
+        from app.providers import with_retries
+
+        waits = []
+        call, _ = self._flaky(2)
+        with_retries(call, delay=2.0, sleep=waits.append)
+        assert waits == [2.0, 4.0]
+
+    def test_a_rejected_key_is_never_retryable(self, monkeypatch):
+        from app.providers.openrouter import OpenRouterProvider
+
+        recorder = _Recorder({"error": {"message": "no"}}, 401)
+        monkeypatch.setattr("httpx.post", recorder)
+        try:
+            OpenRouterProvider(api_key="sk-or-x").generate(model="m", prompt="x")
+        except Exception as exc:
+            assert getattr(exc, "retryable", False) is False
+
+    def test_the_generic_upstream_wrapper_is(self, monkeypatch):
+        """"Provider returned error" is what OpenRouter says when the model
+        behind it hiccupped, which is exactly the case worth retrying."""
+        from app.providers.openrouter import OpenRouterProvider
+
+        recorder = _Recorder({"error": {"message": "Provider returned error"}}, 400)
+        monkeypatch.setattr("httpx.post", recorder)
+        try:
+            OpenRouterProvider(api_key="sk-or-x").generate(model="m", prompt="x")
+        except Exception as exc:
+            assert getattr(exc, "retryable", False) is True

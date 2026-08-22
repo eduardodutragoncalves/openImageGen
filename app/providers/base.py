@@ -16,10 +16,13 @@ cannot, and has to be searched where it lives. So a provider implements either
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,14 @@ class KeyCheck:
 
 class ProviderError(RuntimeError):
     """Anything the provider refused or could not answer."""
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        # True when the same request might work in a moment: an upstream
+        # timeout, a rate limit, capacity. False for a refusal — retrying a
+        # bad key, an empty account or a rejected prompt just spends the
+        # failure twice.
+        self.retryable = retryable
 
 
 @dataclass
@@ -257,6 +268,43 @@ class Provider(ABC):
     ) -> str:
         """Improve a prompt using one of the provider's language models."""
         raise ProviderError(f"{self.label} cannot rewrite prompts")
+
+
+def with_retries(
+    call,
+    *,
+    attempts: int = 3,
+    delay: float = 1.5,
+    describe: str = "the request",
+    sleep=None,
+):
+    """Run `call`, trying again only where trying again could help.
+
+    A provider passes an upstream hiccup straight through — a real job here
+    failed once with nothing but "Provider returned error", and the identical
+    request succeeded a minute later. Retrying that is worth it; retrying a
+    rejected key, an empty account or a refused prompt only spends the failure
+    twice, which is why ProviderError says which kind it is.
+    """
+    import time as _time
+
+    sleep = sleep or _time.sleep
+    last: ProviderError | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return call()
+        except ProviderError as exc:
+            last = exc
+            if not getattr(exc, "retryable", False) or attempt >= attempts:
+                raise
+            wait = delay * attempt
+            logger.warning(
+                "%s failed (attempt %d/%d): %s — trying again in %.1fs",
+                describe, attempt, attempts, exc, wait,
+            )
+            sleep(wait)
+    assert last is not None  # pragma: no cover - the loop either returns or raises
+    raise last
 
 
 def search(models: list[RemoteModel], query: str) -> list[RemoteModel]:

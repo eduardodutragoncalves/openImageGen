@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import re
+import time
 
 import httpx
 from PIL import Image
@@ -111,15 +113,24 @@ class OpenRouterProvider(Provider):
         if response.status_code in (401, 403):
             raise ProviderError("OpenRouter rejected the key")
         if response.status_code >= 400:
+            logger.warning("openrouter: the key check answered HTTP %s", response.status_code)
             raise ProviderError(f"OpenRouter answered {response.status_code}")
 
     # ------------------------------------------------------------- generation
-    def _post(self, payload: dict) -> dict:
+    def _post(self, payload: dict, what: str = "a request") -> dict:
+        """One call to OpenRouter, logged either way.
+
+        `what` names the operation because a single job can make two of these —
+        rewriting the prompt and then generating — and "OpenRouter refused the
+        request" is not an answer when you cannot tell which request.
+        """
         if not self.api_key:
             raise ProviderError(
                 "OpenRouter needs an API key. Add one on the Web models tab or set "
                 "OIG_OPENROUTER_API_KEY."
             )
+        model = payload.get("model", "?")
+        started = time.perf_counter()
         try:
             response = httpx.post(
                 f"{self._base_url}/chat/completions",
@@ -133,20 +144,79 @@ class OpenRouterProvider(Provider):
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
-            raise ProviderError(f"could not reach OpenRouter: {exc}") from exc
+            logger.warning("openrouter: %s with %s could not be sent: %s", what, model, exc)
+            raise ProviderError(f"could not reach OpenRouter: {exc}", retryable=True) from exc
 
+        elapsed = time.perf_counter() - started
+        if response.status_code == 429:
+            logger.warning("openrouter: %s with %s was rate limited", what, model)
+            raise ProviderError("OpenRouter is rate limiting this key.", retryable=True)
         if response.status_code == 401:
+            logger.warning("openrouter: %s with %s rejected the key", what, model)
             raise ProviderError("OpenRouter rejected the API key.")
         if response.status_code == 402:
+            logger.warning("openrouter: %s with %s has no credit", what, model)
             raise ProviderError("OpenRouter reports insufficient credit for that model.")
-        if response.status_code >= 400:
-            detail = ""
-            try:
-                detail = (response.json().get("error") or {}).get("message", "")
-            except Exception:  # noqa: BLE001
-                detail = response.text[:200]
-            raise ProviderError(f"OpenRouter refused the request: {detail or response.status_code}")
-        return response.json()
+
+        try:
+            data = response.json()
+        except ValueError:
+            logger.warning(
+                "openrouter: %s with %s answered HTTP %s with non-JSON: %s",
+                what, model, response.status_code, response.text[:400],
+            )
+            raise ProviderError(
+                f"OpenRouter answered {response.status_code} with something that was not JSON"
+            ) from None
+
+        # An error can arrive with a 200: the HTTP call succeeded and the
+        # inference did not.
+        if response.status_code >= 400 or data.get("error"):
+            detail = self._describe(data, response.status_code)
+            logger.warning(
+                "openrouter: %s with %s failed after %.1fs — HTTP %s: %s",
+                what, model, elapsed, response.status_code, detail,
+            )
+            raise ProviderError(
+                f"{model} refused {what}: {detail}",
+                # A 5xx, or the generic wrapper OpenRouter puts around an
+                # upstream hiccup, is worth one more attempt. A 400 is not.
+                retryable=response.status_code >= 500
+                or "provider returned error" in detail.lower(),
+            )
+
+        logger.info("openrouter: %s with %s in %.1fs", what, model, elapsed)
+        return data
+
+    @staticmethod
+    def _describe(data: dict, status: int) -> str:
+        """The reason, dug out of where OpenRouter puts it.
+
+        Its own `message` is frequently just "Provider returned error"; what
+        actually happened — a content policy refusal, an unsupported parameter,
+        the upstream quota — is in `error.metadata`, and dropping that leaves
+        the operator with nothing to act on.
+        """
+        error = data.get("error") or {}
+        parts: list[str] = []
+        message = str(error.get("message") or "").strip()
+        if message:
+            parts.append(message)
+
+        metadata = error.get("metadata") or {}
+        upstream = metadata.get("provider_name")
+        raw = metadata.get("raw")
+        if raw is not None and not isinstance(raw, str):
+            raw = json.dumps(raw, ensure_ascii=False)
+        raw = (raw or "").strip()
+        if raw:
+            parts.append(f"{upstream or 'the provider'} said: {raw[:600]}")
+        elif upstream:
+            parts.append(f"upstream: {upstream}")
+
+        if reasons := metadata.get("reasons"):
+            parts.append(f"reasons: {reasons}")
+        return " — ".join(parts) or f"HTTP {status}"
 
     def generate(
         self,
@@ -166,21 +236,52 @@ class OpenRouterProvider(Provider):
         # OpenRouter returns one image per completion, so several images means
         # several calls. Each is billed, which is why the count is capped
         # upstream by the same 1..4 the local engine uses.
+        said: str = ""
         for _ in range(max(1, num_images)):
             data = self._post(
                 {
                     "model": model,
                     "messages": [{"role": "user", "content": content}],
                     "modalities": ["image", "text"],
-                }
+                },
+                what="a generation",
             )
-            images.extend(self._images_from(data))
+            produced = self._images_from(data)
+            if not produced:
+                # A model that will not draw something usually says why, in the
+                # text part of the same reply. Throwing that away is how
+                # "returned no image" becomes the only thing anyone ever learns.
+                said = self._text_from(data)
+                logger.warning(
+                    "openrouter: %s returned no image (finish_reason=%s)%s",
+                    model,
+                    self._finish_reason(data),
+                    f" and said: {said[:400]}" if said else "",
+                )
+            images.extend(produced)
+
         if not images:
+            reason = f" It replied: “{said[:300]}”" if said else ""
             raise ProviderError(
-                f"{model} returned no image. Not every model on OpenRouter can produce "
-                "one, even when its catalog entry says so."
+                f"{model} returned no image.{reason} Not every model on OpenRouter can "
+                "produce one, even when its catalog entry says so — and some refuse a "
+                "particular prompt rather than the whole job."
             )
         return images
+
+    @staticmethod
+    def _text_from(data: dict) -> str:
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        return str((choices[0].get("message") or {}).get("content") or "").strip()
+
+    @staticmethod
+    def _finish_reason(data: dict) -> str:
+        choices = data.get("choices") or []
+        if not choices:
+            return "?"
+        return str(choices[0].get("finish_reason") or choices[0].get("native_finish_reason") or "?")
 
     @staticmethod
     def _images_from(data: dict) -> list[Image.Image]:
@@ -216,7 +317,8 @@ class OpenRouterProvider(Provider):
                 ],
                 "temperature": 0.2,
                 "max_tokens": 600,
-            }
+            },
+            what="a prompt rewrite",
         )
         choices = data.get("choices") or []
         text = ((choices[0].get("message") or {}).get("content") or "") if choices else ""

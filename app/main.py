@@ -33,7 +33,7 @@ from .hub import HubError, search as search_hub
 from .images import InvalidImage, decode_image, encode_image, fit_to_budget, mime_type
 from .jobs import Job, JobQueue, QueueFull
 from .model_manager import ModelBusy, ModelManager, UnknownModel
-from .providers import Provider, ProviderError, ProviderRegistry
+from .providers import Provider, ProviderError, ProviderRegistry, with_retries
 from .schemas import (
     CatalogEntry,
     EditRequest,
@@ -170,8 +170,11 @@ def _handle_job(job: Job) -> GenerationResponse:
         provider = state.providers.get("openrouter")
         model = payload.get("upsample_model") or settings.openrouter_model
         job.set_progress(0.0)
-        revised_prompt = provider.rewrite_prompt(
-            model=model, prompt=prompt, references=references or None
+        revised_prompt = with_retries(
+            lambda: provider.rewrite_prompt(
+                model=model, prompt=prompt, references=references or None
+            ),
+            describe="rewriting the prompt",
         )
         prompt = revised_prompt
         upsample_mode = "none"
@@ -271,13 +274,16 @@ def _generate_remote(job: Job, payload: dict, prompt: str):
     t0 = time.perf_counter()
     images = []
     for index in range(count):
-        produced = provider.generate(
-            model=remote["model_id"],
-            prompt=prompt,
-            references=references or None,
-            width=payload.get("width"),
-            height=payload.get("height"),
-            num_images=1,
+        produced = with_retries(
+            lambda: provider.generate(
+                model=remote["model_id"],
+                prompt=prompt,
+                references=references or None,
+                width=payload.get("width"),
+                height=payload.get("height"),
+                num_images=1,
+            ),
+            describe=f"generating with {remote['label']}",
         )
         images.extend(produced)
         job.set_progress((index + 1) / count)
