@@ -1,8 +1,62 @@
 # openImageGen
 
-An HTTP API for image generation and editing with **FLUX.2** (Black Forest
-Labs), served with FastAPI. The service detects the GPUs available at startup
-and places the models itself — from a single 12GB card to a multi-GPU host.
+A studio for image generation and editing with **FLUX.2** (Black Forest Labs),
+and the HTTP API underneath it. It detects the GPUs available at startup and
+places the models itself — from a single 12GB card to a multi-GPU host — and it
+reaches models it does not host at all, through OpenRouter and Runware, from the
+same form.
+
+![The studio](docs/screens/studio.png)
+
+One process serves both: the studio is built into the API and served from the
+same origin, so there is one port, no CORS, and nothing to deploy separately.
+
+```bash
+./scripts/start.sh
+```
+
+---
+
+## What it is
+
+**Compose and watch at once.** Queueing more work while a job runs is the normal
+case, so the form is never blocked by the GPU. The wait is designed rather than
+decorated: progress is per-step and truthful, the estimate is measured from the
+run in progress rather than assumed, and a queued job says what it is waiting
+behind.
+
+**One picker for the whole question.** "What makes this picture" has three
+answers — a checkpoint on your cards, one on Hugging Face that would need
+downloading first, or a model reached over someone else's API — and they used to
+live in three places. Now they are one dialog.
+
+![The model picker](docs/screens/picker.png)
+
+Choosing a local one asks where to put it. On a machine with two GPUs that is a
+real decision and the planner cannot make it for you: splitting a model across
+both cards is what makes FLUX.2 [dev] runnable at all, and it is also what stops
+you using the second card for anything else.
+
+**Models you do not host.** Pin one from a provider's catalog and it becomes a
+target in the compose form next to the resident checkpoint — no VRAM, no swap,
+billed by the provider instead of by your electricity.
+
+![Web models](docs/screens/web-models.png)
+
+The filter is the substance of that page. OpenRouter lists hundreds of models and
+only a handful can emit an image; Runware publishes a few hundred curated ones
+and a mirror of civitai behind them. Both are read for what they *declare* rather
+than guessed at from their names, and the page says how many it dropped.
+
+**Every model this build knows**, runnable here or not, each with the reason —
+because hiding one answers "why can't I pick that?" with silence.
+
+![The model catalog](docs/screens/models.png)
+
+**The archive survives restarts.** Jobs go to SQLite, every result is addressable
+at `/j/<id>`, and retention keeps the files from filling the disk. A job whose
+files were reclaimed still shows its prompt, seed and settings. History is scoped
+per API key, so on a shared server each person sees their own work.
 
 ---
 
@@ -504,29 +558,26 @@ curl -s -X PUT localhost:8000/v1/providers/openrouter/key \
 ## The studio
 
 A single-page app built with Vite and served by this same process from
-`app/static`, so there is one origin, one port and no CORS.
+`app/static`, so there is one origin, one port and no CORS. What it does is
+[up at the top](#what-it-is); this is how to work on it.
 
-- **Compose and watch at once.** Queueing more work while a job runs is the
-  normal case; the form is never blocked by the GPU.
-- **The wait is designed, not decorated.** Progress is per-step and truthful,
-  the estimate is measured from the run in progress rather than assumed, and a
-  queued job says what it is waiting behind.
-- **The archive survives restarts.** Jobs go to SQLite under `OIG_STATE_DIR`,
-  every result is addressable at `/j/<id>`, and `OIG_OUTPUT_MAX_GB` keeps the
-  files from filling the disk. A job whose file retention reclaimed still shows
-  its prompt, seed and settings.
-- **Local and remote in one form.** A model pinned on the Web models tab is a
-  choice next to the resident checkpoint, and the form shows only the controls
-  that target will actually honour.
-- **One picker for the whole question.** "What makes this picture" used to be
-  answered in three places — the Models page, a repo id field at the bottom of
-  it, and a provider tab. **Other model** on the compose form opens all of them
-  at once: what runs on your cards, what the hub has that would need
-  downloading first, and each provider's catalog with a mark saying whether its
-  key was actually tried and accepted. Choosing a local one asks where to put
-  it; choosing a remote one pins it and puts it on the form.
-- **History is scoped per API key**, so on a shared server each person sees
-  their own work. Give each person their own entry in `OIG_API_KEYS`.
+### The design
+
+Dark is the default because of the room, not the category — a workstation beside
+a GPU rig, often dim, judging photographic output over long sessions. The light
+register is fully supported. The construction grid is visible at all times,
+regions are divided by hairlines, and there are no cards, no corner radii and no
+shadows: depth is not part of this world. Every rule it follows is written down
+in [DESIGN.md](DESIGN.md).
+
+![A job, with everything that produced it](docs/screens/job.png)
+
+The archive keeps what a result was made of, not just the file: the prompt as
+typed and as rewritten, the seed, the size, the steps, the model that actually
+ran it, and every reference that went in. **Reuse these settings** puts all of
+it back on the form — not just the prompt.
+
+### Working on it
 
 Development runs Vite against a live API. `./scripts/start.sh` does both at
 once, which is the point of it; by hand it is two terminals:
@@ -543,6 +594,14 @@ the two sides cannot drift:
 
 ```bash
 cd frontend && npm run schema
+```
+
+The screenshots in this README are captured from a running server rather than
+mocked up, so they cannot drift from what the thing does:
+
+```bash
+cd frontend && npm run screens              # all of them, into docs/screens/
+cd frontend && npm run screens -- --only picker
 ```
 
 ---
