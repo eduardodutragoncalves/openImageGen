@@ -377,6 +377,14 @@ first-class state with real phases rather than a spinner, and anything queued
 during it runs once the new model is resident. If the swap fails, the previous
 model is reloaded and the failure is reported.
 
+**Shutting down gives the cards back.** On `SIGTERM` the queue is paused, a
+generation gets a short grace to land, a load in flight abandons itself at its
+next phase — that one has no engine to unload yet, only a thread still copying
+weights across — and whatever reached the card is released. The log says how
+much came back. Stop it with `./scripts/start.sh --stop` or Ctrl-C rather than
+`kill -9`, which leaves tens of gigabytes resident until something else clears
+the driver.
+
 ### Where the weights go
 
 On a machine with one GPU there is nothing to decide. With two, there is, and

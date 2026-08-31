@@ -61,6 +61,16 @@ class ModelStatus:
         }
 
 
+class ShuttingDown(RuntimeError):
+    """Raised inside a load to abandon it because the process is closing.
+
+    A load in flight is the awkward case at shutdown: there is no engine to
+    unload yet, and the thread pulling weights onto the card is a daemon that
+    nothing joins. Raising at the next phase boundary lets it drop what it has
+    already put there.
+    """
+
+
 class ModelBusy(RuntimeError):
     """A load or swap is already running."""
 
@@ -77,6 +87,7 @@ class ModelManager:
         self._lock = threading.Lock()
         self._busy = threading.Event()
         self._ready = threading.Event()
+        self._closing = threading.Event()
         self.status = ModelStatus()
         self.initial_spec = spec_for_repo(settings.repo_id)
 
@@ -157,6 +168,51 @@ class ModelManager:
         )
         return self.status
 
+    # --------------------------------------------------------------- shutdown
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Give the cards back before the process exits.
+
+        Three different things can be holding VRAM here and only one of them is
+        an engine you can call unload() on. A generation may be running, with
+        its own activations resident. A load may be part way through, with no
+        engine assigned yet and a daemon thread still copying weights across.
+        And there may simply be a model sitting there, which is the easy case.
+        """
+        self._closing.set()
+        deadline = time.monotonic() + timeout
+
+        # A short grace, not a long one. A generation takes minutes and the
+        # process is on its way out: waiting for it only delays giving the card
+        # back, and the job is lost either way — the archive marks it
+        # interrupted on the next start.
+        if self._queue is not None:
+            self._queue.pause()
+            remaining = max(0.0, deadline - time.monotonic())
+            if not self._queue.wait_idle(timeout=remaining):
+                logger.warning("a generation was still running; unloading anyway")
+
+        # A load in flight abandons itself at its next phase, and _activate
+        # unloads whatever already reached the card on the way out.
+        while self._busy.is_set() and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if self._busy.is_set():
+            logger.warning("a model operation did not stop in time")
+
+        # unload() releases the allocator itself, so collecting again here
+        # would only be a second sweep over both cards. The case that needs one
+        # is a load abandoned before it produced an engine to unload.
+        had_engine = self._engine is not None
+        self._teardown()
+        if not had_engine:
+            release_cuda_memory()
+
+        free = free_vram_gb()
+        if free:
+            logger.info(
+                "released the GPUs on shutdown: %s GB free",
+                " / ".join(f"{value:.1f}" for value in free),
+            )
+
     # ---------------------------------------------------------------- interns
     def _load_into_place(
         self,
@@ -210,6 +266,11 @@ class ModelManager:
             # restore below needs that memory back before it can succeed.
             release_cuda_memory()
 
+            if self._closing.is_set():
+                logger.info("abandoned loading %s: the service is shutting down", spec.label)
+                self._engine = None
+                self._ready.set()
+                return
             if previous is not None and self._restore(previous, failure):
                 return
 
@@ -338,6 +399,10 @@ class ModelManager:
             )
 
     def _set_phase(self, label: str, progress: float) -> None:
+        # Every phase of a load passes through here, which makes it the place
+        # to notice that there is no longer any point continuing.
+        if self._closing.is_set():
+            raise ShuttingDown("the service is shutting down")
         self.status.phase = label
         self.status.progress = progress
 

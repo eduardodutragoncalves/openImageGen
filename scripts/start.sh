@@ -74,20 +74,28 @@ port_pids() {
 }
 
 stop_port() {
-  local port="$1" label="$2" pids
+  local port="$1" label="$2" pids pid alive
   pids="$(port_pids "$port" || true)"
   [[ -z "$pids" ]] && return 0
 
   say "stopping $label on :$port ($(echo "$pids" | tr '\n' ' '))"
-  # SIGTERM first: the API unloads the model and closes the SQLite archive on
-  # the way out, and killing it outright leaves the weights on the card.
+  # SIGTERM first: the API pauses the queue, abandons a load in flight and
+  # unloads the weights on the way out. Killing it outright leaves tens of
+  # gigabytes resident until something else clears the driver.
   kill $pids 2>/dev/null || true
-  for _ in $(seq 1 40); do
+
+  # Then wait for the *process*, not for the port. uvicorn closes the listening
+  # socket at the start of its shutdown and unloads afterwards, so a free port
+  # means "it heard you", not "it has let go of the card" — and starting the
+  # next server on that difference is how a load finds 8GB free on a 24GB card.
+  for _ in $(seq 1 120); do
+    alive=""
+    for pid in $pids; do kill -0 "$pid" 2>/dev/null && alive="$alive $pid"; done
+    [[ -z "$alive" ]] && return 0
     sleep 0.5
-    [[ -z "$(port_pids "$port" || true)" ]] && return 0
   done
   warn "$label did not stop cleanly; forcing"
-  kill -9 $(port_pids "$port" || true) 2>/dev/null || true
+  kill -9 $alive 2>/dev/null || true
   sleep 1
 }
 

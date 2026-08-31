@@ -489,10 +489,13 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Order matters: the manager pauses the queue and waits for a generation
+    # to land before it unloads, so it goes first and the queue's own stop()
+    # only has to join threads that are already idle.
+    if state.manager is not None:
+        state.manager.shutdown()
     if state.queue is not None:
         state.queue.stop()
-    if state.manager is not None and state.manager.engine is not None:
-        state.manager.engine.unload()
 
 
 app = FastAPI(
