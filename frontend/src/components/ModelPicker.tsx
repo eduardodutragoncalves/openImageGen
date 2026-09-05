@@ -3,6 +3,7 @@ import type { CatalogEntry, GpuInfo, HubModel, Placement, ProviderInfo } from ".
 import {
   useCatalog,
   useGpus,
+  useHealth,
   useHubSearch,
   useLoadModel,
   usePin,
@@ -14,6 +15,7 @@ import {
 } from "../hooks/useApi";
 import { Dialog } from "./Dialog";
 import { RemoteModelList } from "./RemoteModelList";
+import { PlacementDialog } from "./PlacementDialog";
 import { IconCheck, IconClose, IconImage, IconSearch } from "./Icons";
 
 /**
@@ -208,6 +210,8 @@ function LocalModels({ query, onDone }: { query: string; onDone: () => void }) {
 
 function LocalRow({ entry, onDone }: { entry: CatalogEntry; onDone: () => void }) {
   const [open, setOpen] = useState(false);
+  const load = useLoadModel();
+  const health = useHealth();
   return (
     <li className="border-b border-[var(--rule)]">
       <div className="flex items-start gap-3 px-2 py-2">
@@ -236,13 +240,38 @@ function LocalRow({ entry, onDone }: { entry: CatalogEntry; onDone: () => void }
           </button>
         ) : null}
       </div>
-      {open ? <PlacementChoice model={entry.id} onDone={onDone} /> : null}
+      {open ? (
+        <PlacementDialog
+          entry={entry}
+          health={health.data}
+          pending={load.isPending}
+          error={load.isError ? (load.error as Error).message : undefined}
+          onLoad={(placement) =>
+            load.mutate(
+              { model: entry.id, placement: placement.mode, device: placement.device },
+              {
+                onSuccess: () => {
+                  setOpen(false);
+                  onDone();
+                },
+              },
+            )
+          }
+          onClose={() => setOpen(false)}
+        />
+      ) : null}
     </li>
   );
 }
 
 /**
- * Where the weights go.
+ * Where the weights go, for a checkpoint off the hub.
+ *
+ * A catalog entry gets the fuller PlacementDialog, which can say what fits
+ * and what a swap unloads because the registry knows this model's real
+ * footprints. A hub model's size is estimated from its files, so the same
+ * dialog would be stating arithmetic it cannot stand behind — this stays a
+ * plain choice of where to try.
  *
  * The planner is good at fitting the largest checkpoint, and that is exactly
  * why it is not always what you want: splitting a model across both cards is

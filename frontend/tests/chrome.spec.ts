@@ -256,3 +256,65 @@ test.describe("the wait, made visible", () => {
     await expect(panel).toContainText("—");
   });
 });
+
+test.describe("choosing what makes the picture", () => {
+  test("the targets are grouped by where the work happens", async ({ page }) => {
+    await unlock(page);
+    const compose = page.locator("section").first();
+
+    // Local first, and the checkpoint actually resident carries the badge —
+    // the one fact about a local target worth knowing before pressing go.
+    await expect(compose).toContainText(/local/i);
+    await expect(compose).toContainText(/on your GPUs/i);
+    await expect(compose.getByRole("button", { name: /loaded/i })).toBeVisible();
+    await expect(compose.getByRole("button", { name: /other model/i })).toBeVisible();
+  });
+
+  test("a pinned model is filed under the provider that bills for it", async ({ page }) => {
+    await unlock(page);
+    // Pinned through the API so the test does not depend on a provider key
+    // being present to browse a catalog with.
+    const status = await page.evaluate(async () => {
+      const res = await fetch("/v1/providers/runware/pin", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model_id: "xai:grok-imagine@image-quality" }),
+      });
+      return res.status;
+    });
+    test.skip(status !== 201, "the curated catalog was not reachable");
+
+    await page.reload();
+    await expect(page.getByRole("link", { name: /^studio$/i })).toBeVisible();
+    const compose = page.locator("section").first();
+    // A vendor's product name says nothing about who bills for it; the
+    // heading is what tells Runware from OpenRouter without opening anything.
+    await expect(compose).toContainText(/runware/i);
+    await expect(compose).toContainText(/billed per image/i);
+  });
+
+  test("loading a checkpoint asks where it goes, and what that costs", async ({ page }) => {
+    await unlock(page);
+    await page.getByRole("button", { name: /other model/i }).click();
+    const row = page.getByRole("listitem").filter({ hasText: "FLUX.1 [schnell]" });
+    await row.getByRole("button", { name: /^load$/i }).click();
+
+    const dialog = page.getByRole("dialog").last();
+    await expect(dialog).toContainText(/load flux\.1 \[schnell\]/i);
+    // What is on the cards now, so the price of the swap is visible before it
+    // is paid rather than after.
+    await expect(dialog).toContainText(/the cards now/i);
+    await expect(dialog).toContainText(/where it goes/i);
+    await expect(dialog.getByRole("radio")).not.toHaveCount(0);
+
+    // A switch empties every card, not the one you point at, and the dialog
+    // has to say so before the weights move.
+    await expect(dialog).toContainText(/unloads .* from/i);
+    await expect(dialog).toContainText(/every/i);
+
+    // Backing out leaves what is loaded alone.
+    await dialog.getByRole("button", { name: /keep what is loaded/i }).click();
+    await expect(page.getByRole("dialog").last()).not.toContainText(/where it goes/i);
+  });
+});

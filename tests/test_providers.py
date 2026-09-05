@@ -594,6 +594,101 @@ class TestRunwareGeneration:
         assert image_cost(provider.generate(model="bfl:flux@2-dev", prompt="x")[0]) is None
 
 
+class TestSalvagingARepliedImage:
+    """A live server billed twice for images it then threw away.
+
+    Both replies were HTTP 200 carrying a finished image and its price, and
+    both were rejected whole as not-JSON. The head of each was well-formed, so
+    whatever broke the parse came after the first document — and an image the
+    operator has already paid for is worth recovering rather than discarding.
+    """
+
+    def _reply(self, *, trailing: str = "", cost: float = 0.138) -> str:
+        import base64
+        import io
+        import json as jsonlib
+
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "green").save(buffer, format="PNG")
+        body = {
+            "data": [
+                {
+                    "taskType": "imageInference",
+                    "imageUUID": "f4e2b686-e79c-4d91-b267-677d695c5156",
+                    "cost": cost,
+                    "imageBase64Data": base64.b64encode(buffer.getvalue()).decode("ascii"),
+                }
+            ]
+        }
+        return jsonlib.dumps(body) + trailing
+
+    def _provider(self, monkeypatch, text: str, status: int = 200):
+        from app.config import Settings
+        from app.providers.runware import RunwareProvider
+
+        class _Response:
+            status_code = status
+
+            def __init__(self, body):
+                self.text = body
+
+            def json(self):
+                import json as jsonlib
+
+                return jsonlib.loads(self.text)
+
+        monkeypatch.setattr("httpx.post", lambda *a, **k: _Response(text))
+        Settings(_env_file=None)
+        return RunwareProvider(api_key="rw-key")
+
+    def test_a_reply_with_bytes_after_the_document_still_yields_its_image(
+        self, monkeypatch
+    ):
+        from app.providers import image_cost
+
+        provider = self._provider(monkeypatch, self._reply(trailing="\n{}"))
+        images = provider.generate(model="google:4@1", prompt="an athlete")
+        assert len(images) == 1
+        # And the price the operator was charged comes with it.
+        assert image_cost(images[0]) == 0.138
+
+    def test_the_salvage_is_recorded_rather_than_done_silently(self, monkeypatch, caplog):
+        import logging
+
+        provider = self._provider(monkeypatch, self._reply(trailing="garbage"))
+        with caplog.at_level(logging.WARNING, logger="app.providers.runware"):
+            provider.generate(model="google:4@1", prompt="x")
+        assert "recovered the first document" in caplog.text
+
+    def test_a_truly_broken_body_says_how_long_it_was_and_what_the_parser_said(
+        self, monkeypatch, caplog
+    ):
+        """Truncation and trailing bytes need different fixes, and only the
+        length, the tail and the parser's complaint tell them apart."""
+        import logging
+
+        from app.providers import ProviderError
+
+        cut = self._reply()[:200]  # a body that stops mid-string
+        provider = self._provider(monkeypatch, cut)
+        with caplog.at_level(logging.WARNING, logger="app.providers.runware"):
+            with pytest.raises(ProviderError, match="could not be parsed"):
+                provider.generate(model="google:4@1", prompt="x")
+        assert "tail:" in caplog.text
+        assert "200 bytes" in caplog.text
+
+    def test_a_salvaged_failure_is_never_retried_on_its_own(self, monkeypatch):
+        """The generation was billed; trying again spends that a second time."""
+        from app.providers import ProviderError
+
+        provider = self._provider(monkeypatch, self._reply()[:200])
+        with pytest.raises(ProviderError) as caught:
+            provider.generate(model="google:4@1", prompt="x")
+        assert getattr(caught.value, "retryable", False) is False
+
+
 class TestOpenRouterCost:
     """OpenRouter reports what a call cost in `usage`, when the key may see it."""
 

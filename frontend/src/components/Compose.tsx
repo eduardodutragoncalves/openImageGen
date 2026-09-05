@@ -157,6 +157,9 @@ export function Compose({
   const warming = health?.model.state === "loading";
   const switching = health?.model.state === "switching";
   const broken = health?.model.state === "error";
+  // "Loaded" means resident in VRAM right now, not "the model this build
+  // prefers": it is the one thing about a local target worth a badge.
+  const modelReady = health?.model.state === "ready";
 
   const submit = useMutation({
     mutationFn: async () => {
@@ -224,27 +227,51 @@ export function Compose({
           label="generate with"
           hint={isRemote ? "billed by the provider" : "your GPUs"}
         >
-          <div className="flex flex-wrap gap-[2px]">
-            <TargetChip
-              active={!isRemote}
-              label={model?.label ?? "local model"}
-              onClick={() => setTarget("local")}
-            />
-            {(pinned.data ?? []).map((entry) => (
+          {/* Grouped by where the work happens, because that is the difference
+              that matters: one of these spends your VRAM and the rest spend
+              your money. A flat wall of chips made a local checkpoint look
+              like just another vendor's model. */}
+          <div className="flex flex-col gap-3">
+            <TargetGroup label="local" hint="on your GPUs">
               <TargetChip
-                key={entry.key}
-                active={target === entry.key}
-                label={entry.label}
-                onClick={() => setTarget(entry.key)}
+                active={!isRemote}
+                label={model?.label ?? "local model"}
+                onClick={() => setTarget("local")}
+                badge={modelReady ? "loaded" : undefined}
               />
-            ))}
-            {/* Every other way to answer "what makes this picture" — a
-                checkpoint to load, one to download, a provider's catalog —
-                behind the one control that asks the question. */}
+            </TargetGroup>
+
+            {PROVIDER_ORDER.map((provider) => {
+              const entries = (pinned.data ?? []).filter(
+                (entry) => entry.provider === provider,
+              );
+              if (entries.length === 0) return null;
+              return (
+                <TargetGroup
+                  key={provider}
+                  label={PROVIDER_LABEL[provider] ?? provider}
+                  hint="billed per image"
+                >
+                  {entries.map((entry) => (
+                    <TargetChip
+                      key={entry.key}
+                      active={target === entry.key}
+                      label={entry.label}
+                      onClick={() => setTarget(entry.key)}
+                    />
+                  ))}
+                </TargetGroup>
+              );
+            })}
+
+            {/* Outside the groups on purpose: this one dialog holds every way
+                to answer "what makes this picture" — a checkpoint to load, one
+                to download, a provider's catalog — so filing it under LOCAL
+                would promise less than it opens. */}
             <button
               type="button"
               onClick={() => setPickerOpen(true)}
-              className="flex h-8 items-center gap-1 border border-dashed border-[var(--rule-strong)] px-3 text-[11px] text-[var(--ink-muted)] transition-colors hover:border-[var(--accent)] hover:text-[var(--ink)]"
+              className="flex h-8 items-center gap-1 self-start border border-dashed border-[var(--rule-strong)] px-3 text-[11px] text-[var(--ink-muted)] transition-colors hover:border-[var(--accent)] hover:text-[var(--ink)]"
             >
               <IconPlus size={12} />
               <span>Other model</span>
@@ -554,27 +581,75 @@ export function Compose({
   );
 }
 
+const PROVIDER_ORDER = ["openrouter", "runware"] as const;
+const PROVIDER_LABEL: Record<string, string> = {
+  openrouter: "OpenRouter",
+  runware: "Runware",
+};
+
+/**
+ * One row of targets under its own heading.
+ *
+ * The heading is what tells an OpenRouter model from a Runware one without
+ * opening anything — the chips carry a vendor's product name, which says
+ * nothing about who bills for it.
+ */
+function TargetGroup({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-[6px]">
+      <div className="flex items-baseline gap-2">
+        <span className="label">{label}</span>
+        <span className="text-[10px] text-[var(--ink-faint)]">{hint}</span>
+      </div>
+      <div className="flex flex-wrap gap-[2px]">{children}</div>
+    </div>
+  );
+}
+
 function TargetChip({
   active,
   label,
   onClick,
+  badge,
 }: {
   active: boolean;
   label: string;
   onClick: () => void;
+  /** Marks the checkpoint actually resident in VRAM, which is the one fact
+   *  about a local model an operator needs before pressing generate. */
+  badge?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`h-8 max-w-full truncate border px-2 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
+      className={`flex h-8 max-w-full items-center gap-2 border px-2 text-[10px] font-semibold uppercase tracking-[0.08em] transition-colors ${
         active
           ? "border-[var(--accent)] bg-[var(--accent)] text-[var(--ink-on-accent)]"
           : "border-[var(--rule)] text-[var(--ink-muted)] hover:border-[var(--rule-strong)] hover:text-[var(--ink)]"
       }`}
     >
-      {label}
+      <span className="truncate">{label}</span>
+      {badge ? (
+        <span
+          className={`shrink-0 px-1 py-[1px] text-[9px] tracking-[0.1em] ${
+            active
+              ? "bg-[var(--ink-on-accent)] text-[var(--accent)]"
+              : "bg-[var(--accent)] text-[var(--ink-on-accent)]"
+          }`}
+        >
+          {badge}
+        </span>
+      ) : null}
     </button>
   );
 }

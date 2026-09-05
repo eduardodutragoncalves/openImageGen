@@ -639,6 +639,29 @@ to 760px and never collapses — a form you cannot read is not a smaller form.
 Double-click it to go back to 380px. Below the `xl` breakpoint the two panels
 stack, so the handle is not offered: there is no lateral space to trade.
 
+### Choosing what makes the picture
+
+The targets on the compose form are grouped by **where the work happens**,
+because that is the difference that matters: one of them spends your VRAM and
+the rest spend your money. **Local** comes first, with the checkpoint actually
+resident in memory carrying a `loaded` badge; then one group per provider,
+under its own heading — a vendor's product name says nothing about who bills
+for it, so "Nano Banana Pro" alone cannot tell you whether that is OpenRouter
+or Runware.
+
+Loading a local checkpoint asks where it goes, and says what the answer costs:
+what is on each card right now and in what role, which placements this hardware
+can actually hold, and — for the ones it cannot — why not. One thing there is
+easy to assume and wrong: **a switch is not a per-card operation.** The manager
+drains the queue, unloads whatever is resident from *every* card, and only then
+places the new model. So the question is never "which card do I empty"; both
+are emptied either way. It is "where does the new one go", and the dialog says
+so rather than offering a choice the server does not have.
+
+A checkpoint from Hugging Face keeps the plainer control: its size is estimated
+from its files rather than known from the registry, so the fuller dialog would
+be stating arithmetic it cannot stand behind.
+
 ### Watching the wait
 
 Two pieces of motion, and both are readings rather than decoration.
@@ -725,8 +748,8 @@ cd frontend && npm run screens -- --only picker
 ## Tests
 
 ```bash
-pytest tests/                      # 169 checks, no GPU: runs under OIG_DRY_RUN
-cd frontend && npm run test:e2e    # 31 checks, the critical path in a real browser
+pytest tests/                      # 173 checks, no GPU: runs under OIG_DRY_RUN
+cd frontend && npm run test:e2e    # 34 checks, the critical path in a real browser
 ```
 
 Both suites use `OIG_DRY_RUN`, which simulates per-step progress rather than

@@ -184,16 +184,7 @@ class RunwareProvider(Provider):
             raise ProviderError(f"could not reach Runware: {exc}", retryable=True) from exc
 
         elapsed = time.perf_counter() - started
-        try:
-            payload = response.json()
-        except ValueError:
-            logger.warning(
-                "runware: %s answered HTTP %s with non-JSON: %s",
-                what, response.status_code, response.text[:400],
-            )
-            raise ProviderError(
-                f"Runware answered {response.status_code} with something that was not JSON"
-            ) from None
+        payload = self._decode(response, what)
 
         errors = payload.get("errors") or []
         if errors:
@@ -214,6 +205,57 @@ class RunwareProvider(Provider):
 
         logger.info("runware: %s in %.1fs", what, elapsed)
         return payload.get("data") or []
+
+    @staticmethod
+    def _decode(response: httpx.Response, what: str) -> dict:
+        """Runware's answer, recovered where it can be.
+
+        Twice on a live server a 200 came back carrying a finished image *and
+        its price*, and the whole body was rejected as not-JSON — so the
+        operator was billed for a picture this process then threw away. The
+        head of both bodies was well-formed, which rules out an error page and
+        points at whatever follows the first document.
+
+        So the first complete JSON value is parsed and anything after it is
+        ignored, which salvages the image whenever the prefix is whole. Where
+        it is not, the log now carries the byte length, the parser's own
+        complaint and the tail — which is what tells a truncated body from
+        trailing bytes, and is precisely what the first two of these could not
+        say, because only the first 400 characters were ever recorded.
+        """
+        try:
+            return response.json()
+        except ValueError as exc:
+            text = response.text
+            salvaged = None
+            try:
+                value, _end = json.JSONDecoder().raw_decode(text.lstrip())
+                if isinstance(value, dict):
+                    salvaged = value
+            except ValueError:
+                pass
+
+            if salvaged is not None:
+                logger.warning(
+                    "runware: %s answered HTTP %s with %d bytes that would not parse "
+                    "whole (%s); recovered the first document and used it",
+                    what, response.status_code, len(text), exc,
+                )
+                return salvaged
+
+            logger.warning(
+                "runware: %s answered HTTP %s with %d bytes of non-JSON (%s)\n"
+                "  head: %s\n  tail: %s",
+                what, response.status_code, len(text), exc, text[:300], text[-300:],
+            )
+            # Deliberately not retryable: a generation that got this far was
+            # billed, and trying again spends that a second time. Whether to
+            # pay twice is the operator's call, not this loop's.
+            raise ProviderError(
+                f"Runware answered {response.status_code} with {len(text)} bytes "
+                f"that could not be parsed ({exc}). If it billed for this, the image "
+                "was made and lost in transit rather than never made."
+            ) from None
 
     @staticmethod
     def _explain(error: dict, status: int) -> str:
