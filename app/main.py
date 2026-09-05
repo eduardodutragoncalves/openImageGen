@@ -30,16 +30,31 @@ from .config import PROJECT_ROOT, Settings, get_settings
 from .devices import PlacementChoice
 from .engines import EngineResult
 from .hub import HubError, search as search_hub
-from .images import InvalidImage, decode_image, encode_image, fit_to_budget, mime_type
+from .images import (
+    InvalidImage,
+    build_metadata,
+    decode_image,
+    encode_image,
+    fit_to_budget,
+    mime_type,
+    save_image,
+)
 from .jobs import Job, JobQueue, QueueFull
-from .model_manager import ModelBusy, ModelManager, UnknownModel
-from .providers import Provider, ProviderError, ProviderRegistry, with_retries
+from .model_manager import ModelBusy, ModelManager, UnknownDevice, UnknownModel
+from .providers import (
+    Provider,
+    ProviderError,
+    ProviderRegistry,
+    image_cost,
+    with_retries,
+)
 from .schemas import (
     CatalogEntry,
     EditRequest,
     GenerationRequest,
     GenerationResponse,
     GpuInfo,
+    GpuRelease,
     HubModelInfo,
     HealthResponse,
     ImagePayload,
@@ -218,23 +233,33 @@ def _handle_job(job: Job) -> GenerationResponse:
     payloads: list[ImagePayload] = []
     wrote_files = False
     for image, seed in zip(images, seeds):
+        # What made this image, and what it billed, written into the file
+        # itself: the archive row can be deleted or the file downloaded away
+        # from it, and neither should leave an image nobody can attribute.
+        cost = image_cost(image)
+        metadata = build_metadata(model_id=model_id, model_label=model_label, cost=cost)
         if response_format == "url":
             settings.output_dir.mkdir(parents=True, exist_ok=True)
             name = f"{job.id}_{seed}.{output_format}"
-            image.save(settings.output_dir / name)
+            save_image(image, settings.output_dir / name, output_format, metadata=metadata)
             wrote_files = True
             payloads.append(
                 ImagePayload(
-                    url=f"/v1/files/{name}", seed=seed, width=image.width, height=image.height
+                    url=f"/v1/files/{name}",
+                    seed=seed,
+                    width=image.width,
+                    height=image.height,
+                    cost=cost,
                 )
             )
         else:
             payloads.append(
                 ImagePayload(
-                    b64_json=encode_image(image, output_format),
+                    b64_json=encode_image(image, output_format, metadata=metadata),
                     seed=seed,
                     width=image.width,
                     height=image.height,
+                    cost=cost,
                 )
             )
 
@@ -316,7 +341,13 @@ def _record_for(job: Job) -> JobRecord:
     payload = job.payload if isinstance(job.payload, dict) else {}
     result = job.result
     images = [
-        {"url": img.url, "seed": img.seed, "width": img.width, "height": img.height}
+        {
+            "url": img.url,
+            "seed": img.seed,
+            "width": img.width,
+            "height": img.height,
+            "cost": img.cost,
+        }
         for img in (result.images if result else [])
     ]
     duration = None
@@ -363,6 +394,7 @@ def _available(entries: list[dict]) -> list[JobImage]:
                 seed=int(entry.get("seed", 0)),
                 width=int(entry.get("width", 0)),
                 height=int(entry.get("height", 0)),
+                cost=entry.get("cost"),
                 available=bool(url) and (settings.output_dir / Path(url).name).is_file(),
             )
         )
@@ -1072,6 +1104,30 @@ def list_gpus() -> list[GpuInfo]:
     return _gpu_report()
 
 
+@app.post("/v1/gpus/{index}/release", response_model=GpuRelease, tags=["ops"])
+def release_gpu(index: int, owner: str = Depends(require_owner)) -> GpuRelease:
+    """Give one card's memory back.
+
+    Not a card-local operation when the card carries the model: the placement
+    spans devices, so clearing one unloads the model from all of them. The
+    answer says which of the two happened and how much actually came back.
+    """
+    manager = state.manager
+    assert manager is not None
+    try:
+        result = manager.release_device(index)
+    except UnknownDevice as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ModelBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # A generation that outlasted the drain: the card is still in use, and
+        # saying so beats unloading out from under it.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    logger.info("cuda:%d cleared by %s: %s", index, owner, result["detail"])
+    return GpuRelease(**result)
+
+
 # --------------------------------------------------------------------- images
 @app.post(
     "/v1/images/generations",
@@ -1227,6 +1283,7 @@ def get_job(
                     seed=int(entry.get("seed", 0)),
                     width=int(entry.get("width", 0)),
                     height=int(entry.get("height", 0)),
+                    cost=entry.get("cost"),
                 )
                 for entry in record.images
             ],

@@ -60,6 +60,36 @@ def release_cuda_memory() -> None:
             torch.cuda.ipc_collect()
 
 
+def device_memory_mb(index: int) -> tuple[int, int]:
+    """(free, total) on one device, in MB, as the driver reports it.
+
+    The driver's number, not the allocator's: it counts every process on the
+    card, which is the only honest answer to "how full is this GPU".
+    """
+    if not torch.cuda.is_available():
+        return 0, 0
+    free, total = torch.cuda.mem_get_info(index)
+    return free // (1024 * 1024), total // (1024 * 1024)
+
+
+def release_device_memory(index: int) -> None:
+    """Hand back one device's cached blocks, leaving the other cards alone.
+
+    The all-device sweep in release_cuda_memory() is right after an unload,
+    when every card has just been dropped. This is for a card that holds no
+    part of the model, where synchronising the others would stall work that
+    is still running on them for nothing.
+    """
+    gc.collect()
+    gc.collect()
+    if not torch.cuda.is_available():
+        return
+    with torch.cuda.device(index):
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+
 def choose_precision(spec: ModelSpec) -> str:
     """bf16 when the card can hold it, NF4 when it cannot.
 

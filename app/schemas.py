@@ -85,6 +85,10 @@ class ImagePayload(BaseModel):
     seed: int
     width: int
     height: int
+    # What the provider billed for this image, in USD, when it quoted a price.
+    # None for a local generation, which bills nothing — and for a provider
+    # that returned no price, because those are different from "it was free".
+    cost: float | None = None
 
 
 class GenerationResponse(BaseModel):
@@ -119,6 +123,7 @@ class JobImage(BaseModel):
     seed: int
     width: int
     height: int
+    cost: float | None = None
     # False once retention has removed the file the job produced. The row stays
     # so the prompt and settings remain recoverable.
     available: bool = True
@@ -273,7 +278,10 @@ class CatalogEntry(BaseModel):
 class ModelStatusResponse(BaseModel):
     """Where a load or a swap has got to."""
 
-    state: Literal["loading", "ready", "switching", "error"]
+    # "empty" is a deliberate state, not a failure: the operator cleared the
+    # card. It is distinct from "error" because nothing went wrong, and from
+    # "loading" because nothing is on its way.
+    state: Literal["loading", "ready", "switching", "error", "empty"]
     model_id: str | None = None
     target_id: str | None = None
     phase: str
@@ -396,6 +404,22 @@ class HubModelInfo(BaseModel):
     in_catalog: bool = False
     catalog_id: str | None = None
     family: str = "flux2"
+
+
+class GpuRelease(BaseModel):
+    """What came back when a card was cleared.
+
+    `freed_mb` is measured across the call rather than inferred from what was
+    dropped, and `unloaded_model` names the model if clearing the card meant
+    unloading one — on a placement that spans cards, it always does.
+    """
+
+    index: int
+    unloaded_model: str | None = None
+    freed_mb: int
+    free_mb: int
+    total_mb: int
+    detail: str
 
 
 class GpuInfo(BaseModel):

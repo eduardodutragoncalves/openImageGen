@@ -24,6 +24,25 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+# Where a provider records what one image billed, in USD. It rides in the PIL
+# image's own `info` dict rather than in a parallel list, because a list would
+# have to stay in step with the images through retries and partial answers,
+# and the one thing worse than an unpriced image is a mispriced one.
+COST_INFO_KEY = "oig_cost_usd"
+
+
+def tag_cost(image: Image.Image, cost: float | None) -> Image.Image:
+    """Attach what this image billed, when the provider quoted anything."""
+    if cost:
+        image.info[COST_INFO_KEY] = float(cost)
+    return image
+
+
+def image_cost(image: Image.Image) -> float | None:
+    """What the provider billed for this image, or None if it did not say."""
+    value = image.info.get(COST_INFO_KEY)
+    return float(value) if value else None
+
 
 @dataclass(frozen=True)
 class RemoteModel:

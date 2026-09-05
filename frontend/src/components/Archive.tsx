@@ -1,10 +1,14 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { CatalogEntry, JobSummary } from "../lib/api";
+import { useLiveJobs } from "../hooks/useApi";
 import type { ArchiveFilters } from "../hooks/useApi";
 import { shortDate } from "../lib/format";
 import { EmptyField, StateMark } from "./primitives";
 import { IconCaution, IconSearch } from "./Icons";
+import { ShaderField } from "./ShaderField";
+import { useTokenColors } from "../hooks/useTokenColors";
+import { useReducedMotion } from "../hooks/useReducedMotion";
 
 const STATES = ["succeeded", "running", "queued", "rejected", "failed"] as const;
 
@@ -198,9 +202,63 @@ function CellPlaceholder({ job, missing }: { job: JobSummary; missing: boolean }
       </div>
     );
   }
+  // A queued job keeps the dotted field: nothing is happening to it yet, and
+  // that mark is this world's way of saying so. The shader is reserved for
+  // work actually under way, which is what makes it a signal rather than decor.
+  if (job.status === "running") {
+    return <GeneratingCell job={job} />;
+  }
   return (
     <div className="dotted flex h-full items-center justify-center">
       <StateMark state={job.status} />
+    </div>
+  );
+}
+
+/** The stops the field is painted in: the ground it sits on, then the one
+ *  saturated blue this design system spends on state. */
+const FIELD_TOKENS = ["--ground", "--surface-raised", "--accent", "--accent-ink"] as const;
+
+/** A stable per-job field offset, so two cells running at once do not drift in
+ *  lockstep and read as one animation. */
+function seedFor(id: string): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) % 4096;
+  return hash;
+}
+
+/**
+ * The cell of an image being made.
+ *
+ * The picture is not here yet, so the cell shows how much of it is on its way:
+ * the field claims the frame from the left as the steps land, against the
+ * dotted ground that means *nothing here yet*. The edge is hard because this
+ * world measures with cells and rules, not with a soft glow — it is the same
+ * left-to-right reading as the SegmentBar in the panel above.
+ */
+function GeneratingCell({ job }: { job: JobSummary }) {
+  const colours = useTokenColors(FIELD_TOKENS);
+  const still = useReducedMotion();
+  // The archive list refetches every ten seconds, which is right for a wall of
+  // finished work and useless as a progress reading. The live query already
+  // polls at 1.5s while anything is running, and React Query shares it — this
+  // costs no extra request, only a subscription.
+  const { live } = useLiveJobs();
+  const fresh = live.find((entry) => entry.id === job.id);
+  const progress = Math.max(0, Math.min(1, fresh?.progress ?? job.progress ?? 0));
+
+  return (
+    <div className="dotted relative flex h-full items-center justify-center">
+      <div
+        className="absolute inset-0 transition-[clip-path] duration-[1200ms] ease-linear"
+        style={{ clipPath: `inset(0 ${((1 - progress) * 100).toFixed(2)}% 0 0)` }}
+      >
+        <ShaderField colors={colours} paused={still} seed={seedFor(job.id)} />
+      </div>
+      {/* Above the field, and still the thing that says what state this is. */}
+      <span className="relative">
+        <StateMark state="running" />
+      </span>
     </div>
   );
 }

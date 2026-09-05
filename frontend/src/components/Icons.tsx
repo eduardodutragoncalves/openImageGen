@@ -143,22 +143,6 @@ export function IconKey({ size = 16, className }: IconProps) {
   );
 }
 
-export function IconSun({ size = 16, className }: IconProps) {
-  return (
-    <svg {...base(size)} className={className}>
-      <path d="M5.5 5.5h5v5h-5zM8 1v2M8 13v2M1 8h2M13 8h2M3.05 3.05l1.4 1.4M11.55 11.55l1.4 1.4M12.95 3.05l-1.4 1.4M4.45 11.55l-1.4 1.4" />
-    </svg>
-  );
-}
-
-export function IconMoon({ size = 16, className }: IconProps) {
-  return (
-    <svg {...base(size)} className={className}>
-      <path d="M13 9.5A5.5 5.5 0 016.5 3 5.5 5.5 0 108 14a5.5 5.5 0 005-4.5z" />
-    </svg>
-  );
-}
-
 export function IconSeed({ size = 16, className }: IconProps) {
   return (
     <svg {...base(size)} className={className}>

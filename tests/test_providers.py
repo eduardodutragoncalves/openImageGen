@@ -565,6 +565,96 @@ class TestRunwareGeneration:
         with pytest.raises(ProviderError, match="returned no image"):
             provider.generate(model="bfl:flux@2-dev", prompt="x")
 
+    def test_what_an_image_billed_travels_with_that_image(self, monkeypatch):
+        """Runware prices each result, and the price has to reach the file."""
+        from app.providers import image_cost
+
+        provider, _ = _paid(monkeypatch, self._image_payload())
+        images = provider.generate(model="bfl:flux@2-dev", prompt="a lighthouse")
+        assert image_cost(images[0]) == 0.0021
+
+    def test_a_batch_keeps_each_image_at_its_own_price(self, monkeypatch):
+        """Two results at different prices must not be averaged into one."""
+        from app.providers import image_cost
+
+        payload = self._image_payload()
+        cheap = dict(payload["data"][0], cost=0.0009)
+        payload["data"].append(cheap)
+        provider, _ = _paid(monkeypatch, payload)
+        images = provider.generate(model="bfl:flux@2-dev", prompt="x", num_images=2)
+        assert [image_cost(image) for image in images] == [0.0021, 0.0009]
+
+    def test_an_answer_that_quotes_no_price_claims_none(self, monkeypatch):
+        """No price and a free generation are different claims."""
+        from app.providers import image_cost
+
+        payload = self._image_payload()
+        payload["data"][0].pop("cost")
+        provider, _ = _paid(monkeypatch, payload)
+        assert image_cost(provider.generate(model="bfl:flux@2-dev", prompt="x")[0]) is None
+
+
+class TestOpenRouterCost:
+    """OpenRouter reports what a call cost in `usage`, when the key may see it."""
+
+    def _reply(self, images=1, **usage):
+        import base64
+        import io
+
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), "blue").save(buffer, format="PNG")
+        uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+        reply = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": "",
+                        "images": [{"image_url": {"url": uri}} for _ in range(images)],
+                    },
+                }
+            ]
+        }
+        if usage:
+            reply["usage"] = usage
+        return reply
+
+    def _provider(self, monkeypatch, payload):
+        from app.providers.openrouter import OpenRouterProvider
+
+        monkeypatch.setattr("httpx.post", _Recorder(payload, 200))
+        return OpenRouterProvider(api_key="sk-or-x")
+
+    def test_the_reported_cost_reaches_the_image(self, monkeypatch):
+        from app.providers import image_cost
+
+        provider = self._provider(monkeypatch, self._reply(cost=0.0125))
+        assert image_cost(provider.generate(model="m", prompt="x")[0]) == 0.0125
+
+    def test_one_call_returning_two_images_splits_its_charge(self, monkeypatch):
+        """The call is billed once; charging each image the full price doubles it."""
+        from app.providers import image_cost
+
+        provider = self._provider(monkeypatch, self._reply(images=2, cost=0.01))
+        images = provider.generate(model="m", prompt="x")
+        assert [image_cost(image) for image in images] == [0.005, 0.005]
+
+    def test_a_key_that_cannot_see_prices_still_gets_its_image(self, monkeypatch):
+        """Usage accounting is optional; an absent price is not a failure."""
+        from app.providers import image_cost
+
+        provider = self._provider(monkeypatch, self._reply())
+        images = provider.generate(model="m", prompt="x")
+        assert len(images) == 1 and image_cost(images[0]) is None
+
+    def test_a_price_that_is_not_a_number_is_ignored(self, monkeypatch):
+        from app.providers import image_cost
+
+        provider = self._provider(monkeypatch, self._reply(cost="unavailable"))
+        assert image_cost(provider.generate(model="m", prompt="x")[0]) is None
+
 
 class TestBothProviders:
     def test_each_offers_only_the_filters_it_can_honour(self, tmp_path):

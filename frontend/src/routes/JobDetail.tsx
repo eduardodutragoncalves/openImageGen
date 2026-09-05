@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useDeleteJob, useJob } from "../hooks/useApi";
 import type { ComposePreset } from "../components/Compose";
-import { duration, shortDate } from "../lib/format";
+import { duration, shortDate, usd } from "../lib/format";
 import { Readout, StateMark } from "../components/primitives";
 import { IconArrowRight, IconCaution, IconDownload, IconImage, IconTrash } from "../components/Icons";
 
@@ -199,6 +199,18 @@ export function JobDetail() {
             />
             <Readout label="took" value={duration(data.result?.timings?.total_s)} size="sm" />
             <Readout label="made" value={shortDate(data.created)} size="sm" />
+            {/* What made it and what it cost, in the panel rather than only in
+                the file: the header names the model in passing, but this is
+                the grid an operator actually reads a result off. A local run
+                bills nothing and says "—" rather than "$0.00", which would
+                claim it was free instead of unpriced. */}
+            <Readout
+              label="model"
+              value={request?.model_label ?? request?.model_id ?? "—"}
+              size="sm"
+              tone={request?.remote ? "accent" : "ink"}
+            />
+            <Readout label="cost" value={usd(image?.cost) ?? "—"} size="sm" />
           </dl>
 
           <div className="flex flex-col gap-[2px] border-t border-[var(--rule)] pt-3">

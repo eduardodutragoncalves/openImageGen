@@ -545,7 +545,7 @@ export function Compose({
             {health?.detail ?? "No model is loaded."}
           </p>
         ) : null}
-        <button type="submit" disabled={!ready} className="btn btn-primary w-full">
+        <button type="submit" disabled={!ready} className="btn btn-primary btn-shiny w-full">
           <span>{submit.isPending ? "Submitting" : action}</span>
           <Diagonal size={14} />
         </button>

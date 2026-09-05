@@ -71,6 +71,19 @@ export function useGpus(enabled = true) {
 
 /** The hub, searched only once the operator has typed something: an empty
  *  query returns whatever is most downloaded, which is not an answer. */
+/** Clearing a card changes both what is on it and whether a model is loaded,
+ *  so both readings are refetched rather than one. */
+export function useReleaseGpu() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (index: number) => api.releaseGpu(index),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["health"] });
+      client.invalidateQueries({ queryKey: ["gpus"] });
+    },
+  });
+}
+
 export function useHubSearch(query: string, enabled = true) {
   return useQuery({
     queryKey: ["hub-search", query],

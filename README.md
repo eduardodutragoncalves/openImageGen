@@ -211,6 +211,7 @@ redirects to `/docs` when no studio has been built.
 | `GET` | `/v1/providers/pinned` | The pinned ones, usable as `model` on a generation |
 | `DELETE` | `/v1/providers/pinned` | Unpin (`?key=provider:model_id`) |
 | `GET` | `/v1/gpus` | VRAM usage per card and each one's role |
+| `POST` | `/v1/gpus/{index}/release` | Give a card's memory back |
 | `GET` | `/v1/auth` | Whether this caller is authenticated, and as whom |
 | `POST` | `/v1/auth` | Exchange a key for a session cookie |
 | `DELETE` | `/v1/auth` | Sign out |
@@ -295,6 +296,39 @@ With `num_images > 1`, pick which one with `?index=N` (0-based):
 ```bash
 curl -s "localhost:8000/v1/jobs/$JOB/image?index=1" -o fox_2.png
 ```
+
+#### What every image says about itself
+
+Every produced image carries its own provenance, written into the file rather
+than only into the archive row — an image gets downloaded, copied and mailed on
+long after the job that made it was deleted:
+
+| Field | Meaning |
+| --- | --- |
+| `Software` | `openImageGen` |
+| `Model` | the model's name, as the studio shows it |
+| `Model ID` | the identifier that reproduces the generation |
+| `Cost` | what the provider billed for **this** image, when it quoted a price |
+| `Cost Currency` | `USD` |
+
+PNG keeps these as `tEXt` chunks; JPEG and WebP have none, so the same facts go
+into the EXIF `ImageDescription` and `Software` fields. Both are readable with
+`exiftool`, and PNG with Python alone:
+
+```bash
+exiftool -Model -"Model ID" -Cost fox.png
+python -c "from PIL import Image; print(Image.open('fox.png').info)"
+```
+
+The same two facts are on the job itself, in the panel beside the result: the
+**model** that ran it and the **cost** it billed. A local run shows `—` for the
+price rather than `$0.00`, for the same reason the file omits the field.
+
+The cost fields appear only when the provider actually quoted a price —
+Runware prices each image in its answer, and OpenRouter reports what the call
+cost in `usage` for keys allowed to see it. A local generation on your own GPUs
+bills nothing and so says nothing: writing `0.00` would claim it was free
+rather than unpriced.
 
 The same flow through the helper script:
 
@@ -573,10 +607,84 @@ A single-page app built with Vite and served by this same process from
 
 Dark is the default because of the room, not the category — a workstation beside
 a GPU rig, often dim, judging photographic output over long sessions. The light
-register is fully supported. The construction grid is visible at all times,
-regions are divided by hairlines, and there are no cards, no corner radii and no
-shadows: depth is not part of this world. Every rule it follows is written down
-in [DESIGN.md](DESIGN.md).
+register is fully supported. Regions are divided by hairlines, and there are no
+cards, no corner radii and no shadows: depth is not part of this world. Every
+rule it follows is written down in [DESIGN.md](DESIGN.md).
+
+### Fitting it to the work
+
+Two things about the studio are the operator's, and both stick across reloads.
+
+**The ground**, from the four swatches at the right of the rail:
+
+| | What it lays down |
+| --- | --- |
+| **Grid** | the construction grid on the dark ground — the default |
+| **Sheet** | the same grid on the light one |
+| **Black** | flat `#000`, no grid |
+| **White** | flat `#fff`, no grid |
+
+The grid is the armature every region aligns to, which is why it is still the
+default. But it is also a second image behind the first, and a photograph judged
+against a graticule is judged against the graticule too — so it can be dropped,
+and when it is, the field goes pure rather than merely dim. Empty regions keep
+their dotted texture in every ground: that is what says *nothing here yet*, not
+what says *background*.
+
+**The width of the compose column**, by dragging the rule between it and the
+archive. A prompt worth writing wants a wide field; a session spent reading the
+archive wants a narrow one. Drag it, or focus the rule and use `←`/`→` (hold
+`Shift` for a whole 64px cell, `Home`/`End` for the limits). It runs from 288px
+to 760px and never collapses — a form you cannot read is not a smaller form.
+Double-click it to go back to 380px. Below the `xl` breakpoint the two panels
+stack, so the handle is not offered: there is no lateral space to trade.
+
+### Watching the wait
+
+Two pieces of motion, and both are readings rather than decoration.
+
+The **cell of an image being made** carries a WebGL field that claims the frame
+from the left as the steps land, against the dotted ground that means *nothing
+here yet*. The edge is hard, and it runs left to right, because that is the
+same reading as the segment bar in the panel above — this world measures with
+cells and rules, not with a soft glow. The field is painted in the design
+system's own tokens and follows the ground when you change it. It is fed by the
+live poll rather than the archive's ten-second refresh, or it would sit still
+and then jump.
+
+The **generate button** carries a slow conic sweep around its edge, which
+widens and warms under the pointer. It goes flat the moment the button is
+disabled: a control that cannot be pressed has no business drawing the eye.
+
+Both honour `prefers-reduced-motion` — the shader asks for it directly, since
+nothing in CSS can reach a WebGL canvas. Where WebGL is unavailable the cell
+falls back to the dotted field it always had, and where `@property` is
+unsupported the button holds a static bright edge.
+
+### Giving a card back
+
+Hover a GPU tape in the rail and it says what is on that card — the loaded
+model and the part of it that lives there, or plainly that none of it does.
+Click, and it asks before doing anything.
+
+What "clear this GPU" means depends on the answer to that first question, and
+the dialog says which one it is before you confirm:
+
+- **The card carries part of the model.** A model is placed *across* cards, so
+  it cannot be dropped from one and kept on the others — a pipeline missing its
+  text encoder is not a smaller model, it is a broken one. Clearing unloads the
+  model from every card, and generations fail with a message naming the clear
+  until you load one again. The queue is paused and drained first, so nothing
+  is unloaded out from under a running job; a generation that outlasts the
+  drain refuses the clear rather than pulling the weights out mid-step.
+- **The card carries none of it.** Then what is resident is the caching
+  allocator holding blocks it has finished with, and only that card is swept —
+  synchronising the others would stall work still running on them for nothing.
+
+Either way the answer reports what actually came back, measured across the
+call. It is frequently zero, and that is the honest number rather than a
+failure: memory belonging to another process shows as used on the card and no
+call from inside this one can release it.
 
 ![A job, with everything that produced it](docs/screens/job.png)
 
@@ -617,8 +725,8 @@ cd frontend && npm run screens -- --only picker
 ## Tests
 
 ```bash
-pytest tests/                      # 113 checks, no GPU: runs under OIG_DRY_RUN
-cd frontend && npm run test:e2e    # the critical path in a real browser
+pytest tests/                      # 169 checks, no GPU: runs under OIG_DRY_RUN
+cd frontend && npm run test:e2e    # 31 checks, the critical path in a real browser
 ```
 
 Both suites use `OIG_DRY_RUN`, which simulates per-step progress rather than

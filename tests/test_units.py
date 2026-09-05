@@ -7,7 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.images import fit_to_budget
+from PIL import Image
+
+from app.images import build_metadata, encode_image, fit_to_budget, read_metadata, save_image
 from app.models_registry import CATALOG, by_id, spec_for_repo
 from app.store import JobRecord, JobStore, enforce_retention
 
@@ -24,6 +26,77 @@ class TestPixelBudget:
     def test_aspect_ratio_survives_the_scaling(self):
         width, height = fit_to_budget(1920, 1080, 1024 * 1024)
         assert abs((width / height) - (1920 / 1080)) < 0.05
+
+
+class TestImageMetadata:
+    """What produced an image, written where the image goes."""
+
+    def _image(self):
+        return Image.new("RGB", (16, 16), "teal")
+
+    def test_the_model_is_recorded_by_name_and_by_id(self):
+        metadata = build_metadata(model_id="bfl:flux@2-dev", model_label="FLUX.2 [dev]")
+        assert metadata["Model"] == "FLUX.2 [dev]"
+        assert metadata["Model ID"] == "bfl:flux@2-dev"
+
+    def test_a_quoted_cost_is_recorded_with_its_currency(self):
+        metadata = build_metadata(model_label="FLUX.2 [dev]", cost=0.0021)
+        assert metadata["Cost"] == "0.002100"
+        assert metadata["Cost Currency"] == "USD"
+
+    def test_a_fraction_of_a_cent_does_not_round_away_to_zero(self):
+        assert build_metadata(model_label="m", cost=0.000004)["Cost"] == "0.000004"
+
+    def test_an_unpriced_generation_says_nothing_about_cost(self):
+        """A local run bills nothing; writing "0.00" would claim it was free."""
+        metadata = build_metadata(model_id="flux1-dev", model_label="FLUX.1 [dev]")
+        assert "Cost" not in metadata and "Cost Currency" not in metadata
+
+    def test_a_png_carries_the_metadata_through_a_save(self, tmp_path):
+        path = tmp_path / "out.png"
+        save_image(
+            self._image(),
+            path,
+            "png",
+            metadata=build_metadata(model_id="m-id", model_label="M", cost=0.0021),
+        )
+        written = read_metadata(path)
+        assert written["Model"] == "M"
+        assert written["Model ID"] == "m-id"
+        assert written["Cost"] == "0.002100"
+        assert written["Software"] == "openImageGen"
+
+    def test_jpeg_and_webp_carry_it_in_exif_instead(self, tmp_path):
+        """Neither format has text chunks, so the same facts go into EXIF."""
+        for fmt in ("jpeg", "webp"):
+            path = tmp_path / f"out.{fmt}"
+            save_image(
+                self._image(),
+                path,
+                fmt,
+                metadata=build_metadata(model_label="M", cost=0.0021),
+            )
+            written = read_metadata(path)
+            assert written["Model"] == "M", fmt
+            assert written["Cost"] == "0.002100", fmt
+            assert written["Software"] == "openImageGen", fmt
+
+    def test_the_base64_answer_carries_it_too(self, tmp_path):
+        """An image returned inline is the same image as one written to disk."""
+        import base64
+
+        encoded = encode_image(
+            self._image(), "png", metadata=build_metadata(model_label="M", cost=0.5)
+        )
+        path = tmp_path / "decoded.png"
+        path.write_bytes(base64.b64decode(encoded))
+        assert read_metadata(path)["Model"] == "M"
+        assert read_metadata(path)["Cost"] == "0.500000"
+
+    def test_an_image_saved_without_metadata_still_saves(self, tmp_path):
+        path = tmp_path / "bare.png"
+        save_image(self._image(), path, "png")
+        assert "Model" not in read_metadata(path)
 
 
 class TestRegistry:

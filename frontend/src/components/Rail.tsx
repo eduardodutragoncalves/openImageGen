@@ -1,8 +1,9 @@
 import { NavLink } from "react-router-dom";
 import type { Health } from "../lib/api";
-import { gigabytes } from "../lib/format";
-import { SegmentBar, Diagonal } from "./primitives";
-import { IconMoon, IconSun } from "./Icons";
+import { Diagonal } from "./primitives";
+import { GpuCard } from "./GpuCard";
+import { VISUALS } from "../hooks/useVisual";
+import type { Visual } from "../hooks/useVisual";
 
 /**
  * The status rail. Fixed height, fixed positions: the operator learns where
@@ -12,13 +13,13 @@ import { IconMoon, IconSun } from "./Icons";
 export function Rail({
   health,
   precision,
-  theme,
-  onToggleTheme,
+  visual,
+  onVisual,
 }: {
   health?: Health;
   precision?: string;
-  theme: "dark" | "light";
-  onToggleTheme: () => void;
+  visual: Visual;
+  onVisual: (visual: Visual) => void;
 }) {
   const model = health?.model;
   const gpus = health?.gpus ?? [];
@@ -34,19 +35,12 @@ export function Rail({
 
       <ModelPlate health={health} precision={precision} />
 
-      <div className="hidden items-center gap-5 border-r border-[var(--rule)] px-4 lg:flex">
+      <div className="hidden items-center gap-3 border-r border-[var(--rule)] px-3 lg:flex">
         {gpus.length === 0 ? (
           <span className="text-xs text-[var(--ink-faint)]">no CUDA device</span>
         ) : (
           gpus.map((gpu) => (
-            <GpuTape
-              key={gpu.index}
-              index={gpu.index}
-              name={gpu.name}
-              usedMb={gpu.memory_used_mb}
-              totalMb={gpu.memory_total_mb}
-              role={gpu.role ?? undefined}
-            />
+            <GpuCard key={gpu.index} gpu={gpu} modelId={model?.model_id} />
           ))
         )}
       </div>
@@ -66,18 +60,67 @@ export function Rail({
         <RailLink to="/models">Models</RailLink>
       </nav>
 
-      <button
-        type="button"
-        onClick={onToggleTheme}
-        className="flex w-[var(--rail)] items-center justify-center border-l border-[var(--rule)] text-[var(--ink-muted)] transition-colors hover:text-[var(--accent-ink)]"
-        aria-label={theme === "dark" ? "Switch to the light sheet" : "Switch to the dark ground"}
-        title={theme === "dark" ? "Light" : "Dark"}
-      >
-        {theme === "dark" ? <IconSun /> : <IconMoon />}
-      </button>
+      <GroundPicker visual={visual} onVisual={onVisual} />
 
       {model?.state === "ready" ? null : <RailState state={model?.state} phase={model?.phase} />}
     </header>
+  );
+}
+
+/**
+ * The ground, picked rather than cycled. Four swatches showing the field each
+ * one lays down: a cycling button would hide three of the four answers behind
+ * a guess about how many presses it takes, and this is a choice about how the
+ * work *looks*, which is the one thing you should be able to see before you
+ * commit to it.
+ */
+function GroundPicker({
+  visual,
+  onVisual,
+}: {
+  visual: Visual;
+  onVisual: (visual: Visual) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Ground"
+      className="flex items-stretch border-l border-[var(--rule)]"
+    >
+      {VISUALS.map((entry) => {
+        const active = entry.id === visual;
+        return (
+          <button
+            key={entry.id}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            aria-label={entry.hint}
+            title={`${entry.label} — ${entry.hint}`}
+            onClick={() => onVisual(entry.id)}
+            className="flex w-7 items-center justify-center transition-colors hover:bg-[var(--accent-wash)]"
+          >
+            <span
+              aria-hidden
+              className="h-4 w-4 border"
+              style={{
+                backgroundColor: entry.swatch.fill,
+                // The 4px cell is the construction grid at swatch scale, so
+                // the sample is the ground itself rather than a picture of it.
+                backgroundImage: entry.swatch.line
+                  ? `linear-gradient(to right, ${entry.swatch.line} 1px, transparent 1px),` +
+                    `linear-gradient(to bottom, ${entry.swatch.line} 1px, transparent 1px)`
+                  : undefined,
+                backgroundSize: "4px 4px",
+                borderColor: active ? "var(--accent)" : "var(--rule-strong)",
+                outline: active ? "1px solid var(--accent)" : undefined,
+                outlineOffset: "1px",
+              }}
+            />
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -93,35 +136,6 @@ function ModelPlate({ health, precision }: { health?: Health; precision?: string
           <span className="text-[10px] text-[var(--ink-faint)]">{precision}</span>
         ) : null}
       </span>
-    </div>
-  );
-}
-
-function GpuTape({
-  index,
-  name,
-  usedMb,
-  totalMb,
-  role,
-}: {
-  index: number;
-  name: string;
-  usedMb: number;
-  totalMb: number;
-  role?: string;
-}) {
-  const ratio = totalMb > 0 ? usedMb / totalMb : 0;
-  // Pressure is legible before an OOM, not after it.
-  const tone = ratio > 0.94 ? "alarm" : ratio > 0.82 ? "caution" : "accent";
-  return (
-    <div className="flex flex-col justify-center gap-[3px]" title={`${name}${role ? ` — ${role}` : ""}`}>
-      <div className="flex items-baseline gap-2">
-        <span className="label">gpu{index}</span>
-        <span className="font-mono text-[10px] tabular text-[var(--ink-muted)]">
-          {gigabytes(usedMb)}/{gigabytes(totalMb)} GB
-        </span>
-      </div>
-      <SegmentBar ratio={ratio} segments={10} tone={tone} height={6} />
     </div>
   );
 }

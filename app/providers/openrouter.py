@@ -18,7 +18,7 @@ import time
 import httpx
 from PIL import Image
 
-from .base import Provider, ProviderError, RemoteModel
+from .base import Provider, ProviderError, RemoteModel, tag_cost
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +247,12 @@ class OpenRouterProvider(Provider):
                 what="a generation",
             )
             produced = self._images_from(data)
+            # OpenRouter bills the whole completion, not each image in it, so a
+            # reply carrying more than one splits the charge evenly. Anything
+            # else would bill each image for the whole call.
+            if (call_cost := self._cost_from(data)) and produced:
+                for image in produced:
+                    tag_cost(image, call_cost / len(produced))
             if not produced:
                 # A model that will not draw something usually says why, in the
                 # text part of the same reply. Throwing that away is how
@@ -268,6 +274,20 @@ class OpenRouterProvider(Provider):
                 "particular prompt rather than the whole job."
             )
         return images
+
+    @staticmethod
+    def _cost_from(data: dict) -> float:
+        """What OpenRouter says the call cost, in USD credits.
+
+        Reported in `usage`, and only for keys allowed to see it — an account
+        with usage accounting off gets images and no price, which is why this
+        answers 0.0 rather than raising.
+        """
+        usage = data.get("usage") or {}
+        try:
+            return float(usage.get("cost") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
     @staticmethod
     def _text_from(data: dict) -> str:

@@ -281,6 +281,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/gpus/{index}/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release Gpu
+         * @description Give one card's memory back.
+         *
+         *     Not a card-local operation when the card carries the model: the placement
+         *     spans devices, so clearing one unloads the model from all of them. The
+         *     answer says which of the two happened and how much actually came back.
+         */
+        post: operations["release_gpu_v1_gpus__index__release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/images/generations": {
         parameters: {
             query?: never;
@@ -626,6 +650,28 @@ export interface components {
             /** Role */
             role?: string | null;
         };
+        /**
+         * GpuRelease
+         * @description What came back when a card was cleared.
+         *
+         *     `freed_mb` is measured across the call rather than inferred from what was
+         *     dropped, and `unloaded_model` names the model if clearing the card meant
+         *     unloading one — on a placement that spans cards, it always does.
+         */
+        GpuRelease: {
+            /** Index */
+            index: number;
+            /** Unloaded Model */
+            unloaded_model?: string | null;
+            /** Freed Mb */
+            freed_mb: number;
+            /** Free Mb */
+            free_mb: number;
+            /** Total Mb */
+            total_mb: number;
+            /** Detail */
+            detail: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -703,6 +749,8 @@ export interface components {
             width: number;
             /** Height */
             height: number;
+            /** Cost */
+            cost?: number | null;
         };
         /**
          * JobImage
@@ -717,6 +765,8 @@ export interface components {
             width: number;
             /** Height */
             height: number;
+            /** Cost */
+            cost?: number | null;
             /**
              * Available
              * @default true
@@ -949,7 +999,7 @@ export interface components {
              * State
              * @enum {string}
              */
-            state: "loading" | "ready" | "switching" | "error";
+            state: "loading" | "ready" | "switching" | "error" | "empty";
             /** Model Id */
             model_id?: string | null;
             /** Target Id */
@@ -1702,6 +1752,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GpuInfo"][];
+                };
+            };
+        };
+    };
+    release_gpu_v1_gpus__index__release_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "X-API-Key"?: string | null;
+            };
+            path: {
+                index: number;
+            };
+            cookie?: {
+                oig_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GpuRelease"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

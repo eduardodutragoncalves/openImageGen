@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { CSSProperties } from "react";
 import { useLocation } from "react-router-dom";
 import type { Health } from "../lib/api";
 import {
@@ -15,6 +16,8 @@ import type { ComposePreset } from "../components/Compose";
 import { ActiveJob } from "../components/ActiveJob";
 import { Archive } from "../components/Archive";
 import { Region } from "../components/primitives";
+import { Splitter } from "../components/Splitter";
+import { useSplit } from "../hooks/useSplit";
 
 const PAGE = 60;
 
@@ -31,6 +34,7 @@ export function Studio({ health }: { health?: Health }) {
   const catalog = useCatalog();
   const [filters, setFilters] = useState<ArchiveFilters>({});
   const [limit, setLimit] = useState(PAGE);
+  const split = useSplit("oig-compose-width");
   const archive = useArchive(filters, limit);
 
   const liveJobs = live.live;
@@ -42,12 +46,23 @@ export function Studio({ health }: { health?: Health }) {
   const total = archive.data?.total ?? 0;
 
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[380px_minmax(0,1fr)]">
+    <div
+      className="grid min-h-0 flex-1 grid-cols-1 xl:grid-cols-[var(--compose-w)_minmax(0,1fr)]"
+      style={{ "--compose-w": `${split.width}px` } as CSSProperties}
+    >
       <Region
         label="compose"
-        className="min-h-0 border-b border-[var(--rule)] xl:border-b-0 xl:border-r"
+        className="relative min-h-0 border-b border-[var(--rule)] xl:border-b-0 xl:border-r"
       >
         <Compose model={model.data} health={health} preset={preset} />
+        {/* Only where the columns are side by side. Stacked, there is no
+            lateral space to trade and the handle would resize nothing. */}
+        <Splitter
+          width={split.width}
+          onWidth={split.set}
+          onReset={split.reset}
+          label="Compose width"
+        />
       </Region>
 
       <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)]">

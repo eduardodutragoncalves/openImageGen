@@ -24,7 +24,13 @@ from dataclasses import dataclass, field
 from .config import Settings
 from .devices import PlacementChoice, available_gpus, plan_placement
 from .engines import BaseEngine, create_engine
-from .engines.base import choose_precision, free_vram_gb, release_cuda_memory
+from .engines.base import (
+    choose_precision,
+    device_memory_mb,
+    free_vram_gb,
+    release_cuda_memory,
+    release_device_memory,
+)
 from .jobs import JobQueue
 from .models_registry import CATALOG, ModelSpec, by_id, spec_for_repo
 
@@ -39,7 +45,7 @@ DRAIN_TIMEOUT_S = 1800
 
 @dataclass
 class ModelStatus:
-    state: str = "loading"  # loading | ready | switching | error
+    state: str = "loading"  # loading | ready | switching | error | empty
     model_id: str | None = None
     target_id: str | None = None
     phase: str = "starting"
@@ -73,6 +79,10 @@ class ShuttingDown(RuntimeError):
 
 class ModelBusy(RuntimeError):
     """A load or swap is already running."""
+
+
+class UnknownDevice(ValueError):
+    """Asked to act on a card this process cannot see."""
 
 
 class UnknownModel(ValueError):
@@ -167,6 +177,120 @@ class ModelManager:
             phase="draining the queue",
         )
         return self.status
+
+    # ---------------------------------------------------------------- release
+    def _holds_model(self, index: int) -> bool:
+        """Whether part of the loaded model sits on this card."""
+        engine = self._engine
+        if engine is None:
+            return False
+        plan = engine.plan
+        return f"cuda:{index}" in {plan.transformer_device, plan.text_encoder_device}
+
+    def release_device(self, index: int) -> dict:
+        """Give one card's memory back, as far as this process owns any of it.
+
+        Two different requests wear the same name here, and which one this is
+        depends on what the card is carrying.
+
+        If it carries part of the loaded model, "clear this GPU" can only mean
+        unloading the model — the placement spans cards, and a pipeline whose
+        text encoder has been dropped is not a smaller model, it is a broken
+        one. So the whole thing goes, from every card, and the caller is told
+        that is what happened rather than discovering it afterwards.
+
+        If it carries no part of the model, what is resident is the caching
+        allocator holding blocks it has finished with, and that can be handed
+        back on its own without touching the other cards.
+
+        Either way the number reported is measured across the call rather than
+        assumed from what was dropped: memory belonging to another process
+        shows as used on this card and nothing called from inside this one can
+        release it, so claiming it back would be a lie.
+        """
+        import torch
+
+        if not torch.cuda.is_available():
+            raise UnknownDevice("no CUDA device is visible to this process")
+        count = torch.cuda.device_count()
+        if not 0 <= index < count:
+            raise UnknownDevice(
+                f"there is no cuda:{index}; this process sees {count} card(s)"
+            )
+        # A load in flight is putting weights on the cards right now. Freeing
+        # underneath it would race the thread doing the copying.
+        if self._busy.is_set():
+            raise ModelBusy(
+                "a model is being loaded or swapped; clear the card once it settles"
+            )
+
+        holds_model = self._holds_model(index)
+        free_before, total = device_memory_mb(index)
+        unloaded: str | None = None
+
+        if holds_model:
+            unloaded = self.status.model_id or (
+                self._engine.spec.id if self._engine is not None else None
+            )
+            # Refuses rather than unloading under a running generation: the
+            # queue is paused and drained first, exactly as a swap does.
+            self._drain()
+            try:
+                self._teardown()
+                release_cuda_memory()
+                self.status = ModelStatus(
+                    state="empty",
+                    model_id=None,
+                    phase="no model loaded",
+                    progress=0.0,
+                    detail="the GPU was cleared; load a model to generate again",
+                    finished=int(time.time()),
+                )
+                # Left set on purpose. A job submitted now should fail at once
+                # with the reason above, not block for the warm-up timeout
+                # waiting for a load nobody asked for.
+                self._ready.set()
+            finally:
+                if self._queue is not None:
+                    self._queue.resume()
+        else:
+            release_device_memory(index)
+
+        free_after, _ = device_memory_mb(index)
+        freed = max(0, free_after - free_before)
+        logger.info(
+            "released cuda:%d — %d MB came back%s",
+            index,
+            freed,
+            f", unloading {unloaded}" if unloaded else "",
+        )
+        return {
+            "index": index,
+            "unloaded_model": unloaded,
+            "freed_mb": freed,
+            "free_mb": free_after,
+            "total_mb": total,
+            "detail": self._release_detail(freed, unloaded, free_after, total),
+        }
+
+    @staticmethod
+    def _release_detail(
+        freed: int, unloaded: str | None, free_after: int, total: int
+    ) -> str:
+        """What actually happened, in the words an operator can act on."""
+        if unloaded:
+            return (
+                f"Unloaded {unloaded} and gave back {freed} MB. "
+                f"{free_after} of {total} MB free. Load a model to generate again."
+            )
+        if freed:
+            return f"Gave back {freed} MB of cached memory. {free_after} of {total} MB free."
+        # The honest answer, and the common one: nothing of ours was cached, so
+        # whatever is resident belongs to a process this one cannot reach into.
+        return (
+            f"Nothing to give back: this process holds no cached memory on that card. "
+            f"{free_after} of {total} MB free — anything in use belongs to another process."
+        )
 
     # --------------------------------------------------------------- shutdown
     def shutdown(self, timeout: float = 5.0) -> None:

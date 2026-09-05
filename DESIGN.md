@@ -118,7 +118,7 @@ components:
 **Creative North Star: "The Instrument Sheet"**
 
 A sheet of engineering graph paper that reports on a machine. The construction
-grid is visible at all times and everything on screen sits on it; readings hold
+grid is the default ground and everything on screen sits on it; readings hold
 fixed positions so they can be found without looking for them, and a number
 never changes width as it updates. The system descends from Wim Crouwel's
 gridded type specimens by way of the instrument panel: the specimen supplies
@@ -140,7 +140,9 @@ ships: a centred prompt bar floating over rounded cards on a dark gradient.
 
 **Key Characteristics:**
 
-- The construction grid is always visible and every region aligns to its 8px cell.
+- The construction grid is the default ground and every region aligns to its
+  8px cell — including in the flat grounds, where the armature is unpainted but
+  still governs every dimension.
 - Regions are divided by hairlines; boxes, radii and shadows do not exist.
 - Colour is spent on state and navigation, never on decoration.
 - Measurements are set in a grid-constructed mono with tabular figures.
@@ -233,10 +235,21 @@ grid is painted on the document ground as four repeating gradients and is
 never covered: regions and cells are transparent, and their edges are drawn
 with rules rather than fills, so the armature reads through the whole surface.
 
+The ground is the operator's, through four swatches on the rail: the grid on
+the dark ground or the light sheet, or a flat pure black or white with no grid
+at all. The armature still governs every dimension in the flat grounds — it is
+unpainted, not abandoned. The reason to allow it: the grid is a second image
+behind the first, and a photograph judged against a graticule is judged against
+the graticule too. Empty regions keep their dotted texture in every ground,
+because that mark says *nothing here yet* rather than *ground*.
+
 The application shell is a fixed-height column: a 56px status rail that never
 scrolls, then the working area. On the studio route the working area is a
-`380px` compose column and a fluid column holding the running job above the
-archive. Below 1280px the two columns stack; the rail sheds the VRAM tapes at
+compose column and a fluid column holding the running job above the archive.
+The compose column starts at `380px` and is dragged by the rule between the
+two, from 288px to 760px, remembered across reloads; it never collapses,
+because a form you cannot read is not a smaller form. Below 1280px the two
+columns stack and the handle is withdrawn; the rail sheds the VRAM tapes at
 1024px and the model plate at 640px so that navigation survives a narrow
 window. The archive is a `repeat(auto-fill, minmax(196px, 1fr))` grid.
 

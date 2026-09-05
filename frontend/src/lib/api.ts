@@ -4,6 +4,7 @@ type S = components["schemas"];
 
 export type Health = S["HealthResponse"];
 export type GpuInfo = S["GpuInfo"];
+export type GpuRelease = S["GpuRelease"];
 export type ModelInfo = S["ModelInfo"];
 export type CatalogEntry = S["CatalogEntry"];
 export type ModelStatus = S["ModelStatusResponse"];
@@ -108,6 +109,9 @@ export const api = {
     }),
 
   gpus: () => request<GpuInfo[]>("/v1/gpus"),
+
+  releaseGpu: (index: number) =>
+    request<GpuRelease>(`/v1/gpus/${index}/release`, { method: "POST" }),
 
   hubSearch: (q: string, limit = 30) =>
     request<HubModel[]>(

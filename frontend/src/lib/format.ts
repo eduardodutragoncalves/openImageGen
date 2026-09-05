@@ -53,3 +53,16 @@ export function percent(value: number | null | undefined): string {
 export function megapixels(pixels: number): string {
   return `${(pixels / 1_000_000).toFixed(1)}`;
 }
+
+/**
+ * A provider's price for one image, in USD.
+ *
+ * Four decimals because a single image routinely bills fractions of a cent,
+ * and a price rounded to "$0.00" reads as free rather than as cheap. Returns
+ * null when nothing was quoted: an absent price and a zero price are
+ * different claims, and only the caller can decide how to show the absence.
+ */
+export function usd(value: number | null | undefined): string | null {
+  if (value == null || !Number.isFinite(value) || value <= 0) return null;
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}

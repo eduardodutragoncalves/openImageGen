@@ -1,30 +1,14 @@
-import { useEffect, useState } from "react";
 import { Route, Routes } from "react-router-dom";
 import { useAuth, useHealth, useModel } from "./hooks/useApi";
+import { useVisual } from "./hooks/useVisual";
 import { Rail } from "./components/Rail";
 import { AuthGate } from "./components/AuthGate";
 import { Studio } from "./routes/Studio";
 import { Models } from "./routes/Models";
 import { JobDetail } from "./routes/JobDetail";
 
-type Theme = "dark" | "light";
-
-/** Dark is the default because of the room this runs in, not the category:
- *  a workstation beside the rig, judging photographs for hours. The choice is
- *  still the operator's, and it sticks. */
-function useTheme() {
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem("oig-theme") as Theme) ?? "dark",
-  );
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem("oig-theme", theme);
-  }, [theme]);
-  return [theme, () => setTheme((current) => (current === "dark" ? "light" : "dark"))] as const;
-}
-
 export function App() {
-  const [theme, toggleTheme] = useTheme();
+  const [visual, setVisual] = useVisual();
   const auth = useAuth();
   const authenticated = auth.data?.authenticated ?? false;
   const health = useHealth();
@@ -44,7 +28,12 @@ export function App() {
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden">
-      <Rail health={health.data} precision={model.data?.precision} theme={theme} onToggleTheme={toggleTheme} />
+      <Rail
+        health={health.data}
+        precision={model.data?.precision}
+        visual={visual}
+        onVisual={setVisual}
+      />
       {health.isError ? <Unreachable /> : null}
       <Routes>
         <Route path="/" element={<Studio health={health.data} />} />

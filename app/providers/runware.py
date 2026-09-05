@@ -30,7 +30,7 @@ import uuid
 import httpx
 from PIL import Image
 
-from .base import ModelPage, Provider, ProviderError, RemoteModel
+from .base import ModelPage, Provider, ProviderError, RemoteModel, tag_cost
 
 logger = logging.getLogger(__name__)
 
@@ -445,8 +445,12 @@ class RunwareProvider(Provider):
                 continue
             if isinstance(raw, str) and raw.startswith("data:"):
                 raw = raw.split(",", 1)[-1]
-            images.append(Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGB"))
-            cost += float(entry.get("cost") or 0.0)
+            image = Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGB")
+            # Runware prices each result separately, so the price stays with
+            # the image it belongs to rather than being averaged over a batch.
+            entry_cost = float(entry.get("cost") or 0.0)
+            images.append(tag_cost(image, entry_cost))
+            cost += entry_cost
 
         if not images:
             raise ProviderError(f"{model} returned no image")
